@@ -99,22 +99,22 @@ When a webhook event is received, the system automatically:
 
 **List All Collections:**
 ```bash
-curl "http://localhost:8000/admin/collections?admin_token=your_token"
+curl "http://localhost:8050/admin/collections?admin_token=your_token"
 ```
 
 **Get Collection Info:**
 ```bash
-curl "http://localhost:8000/admin/collections/facebook/react?admin_token=your_token"
+curl "http://localhost:8050/admin/collections/facebook/react?admin_token=your_token"
 ```
 
 **Refresh Collection:**
 ```bash
-curl -X POST "http://localhost:8000/admin/collections/facebook/react/refresh?installation_id=12345&admin_token=your_token"
+curl -X POST "http://localhost:8050/admin/collections/facebook/react/refresh?installation_id=12345&admin_token=your_token"
 ```
 
 **Delete Collection:**
 ```bash
-curl -X DELETE "http://localhost:8000/admin/collections/facebook/react?admin_token=your_token"
+curl -X DELETE "http://localhost:8050/admin/collections/facebook/react?admin_token=your_token"
 ```
 
 ### Programmatic Usage
@@ -208,7 +208,7 @@ await refresh_repository_knowledge_base(repo_name, installation_id)
 du -sh ./chroma_db/
 
 # Clean up unused collections
-curl -X DELETE "http://localhost:8000/admin/collections/unused/repo?admin_token=token"
+curl -X DELETE "http://localhost:8050/admin/collections/unused/repo?admin_token=token"
 ```
 
 **Performance Issues:**
@@ -220,12 +220,12 @@ curl -X DELETE "http://localhost:8000/admin/collections/unused/repo?admin_token=
 
 **Health Check Endpoint:**
 ```bash
-curl http://localhost:8000/health
+curl http://localhost:8050/health
 ```
 
 **Collection Statistics:**
 ```bash
-curl "http://localhost:8000/admin/collections?admin_token=token"
+curl "http://localhost:8050/admin/collections?admin_token=token"
 ```
 
 ### Logging

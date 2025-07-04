@@ -5,11 +5,19 @@ from pydantic_settings import BaseSettings
 from pydantic import validator, Field, ConfigDict
 import json
 import logging
+from dotenv import load_dotenv
+
+load_dotenv()
 
 class Settings(BaseSettings):
     """Application settings with validation."""
     
-    model_config = ConfigDict(extra='allow')
+    model_config = ConfigDict(
+        extra='allow',
+        env_file='.env',
+        env_file_encoding='utf-8',
+        case_sensitive=False
+    )
     
     # Environment settings
     environment: str = Field(
@@ -20,21 +28,25 @@ class Settings(BaseSettings):
     # GitHub App settings
     github_app_id: str = Field(
         ...,
-        description="GitHub App ID from the GitHub App settings page"
+        description="GitHub App ID from the GitHub App settings page",
+        env="GITHUB_APP_ID"
     )
     github_private_key: str = Field(
         ...,
-        description="GitHub App private key (contents of the .pem file)"
+        description="GitHub App private key (contents of the .pem file)",
+        env="GITHUB_PRIVATE_KEY"
     )
     github_webhook_secret: str = Field(
         ...,
-        description="GitHub webhook secret for verifying webhook payloads"
+        description="GitHub webhook secret for verifying webhook payloads",
+        env="GITHUB_WEBHOOK_SECRET"
     )
     
     # Gemini API settings
     gemini_api_key: str = Field(
         ...,
-        description="Google Gemini API key for LLM functionality"
+        description="Google Gemini API key for LLM functionality",
+        env="GEMINI_API_KEY"
     )
     
     # Storage settings
@@ -105,4 +117,8 @@ class Settings(BaseSettings):
         )
 
 # Initialize settings
-settings = Settings() 
+try:
+    settings = Settings()
+except Exception as e:
+    print("\nError loading settings:", str(e))
+    raise 

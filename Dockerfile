@@ -23,6 +23,6 @@ RUN useradd -m -u 1000 gitbot
 RUN chown -R gitbot:gitbot /app
 USER gitbot
 
-EXPOSE 8000
+EXPOSE 8050
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8050"]

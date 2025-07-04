@@ -59,7 +59,7 @@ cp .env.example .env  # Fill in your GitHub App and Gemini credentials
 
 ```bash
 docker build -t gitbot-backend .
-docker run -p 8000:8000 --env-file .env gitbot-backend
+docker run -p 8050:8050 --env-file .env gitbot-backend
 ```
 
 ### 3. Local Development

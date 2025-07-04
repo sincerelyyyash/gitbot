@@ -3,7 +3,7 @@ module.exports = {
     {
       name: "gitbot",
       script: "uvicorn",
-      args: "app.main:app --host 0.0.0.0 --port 8000",
+      args: "app.main:app --host 0.0.0.0 --port 8050",
       interpreter: "venv/bin/python",
       watch: false,
       env: {
