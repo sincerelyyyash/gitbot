@@ -1,6 +1,8 @@
 import logging
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import JSONResponse
 from app.api.webhook import router as webhook_router
 from app.config import settings
 from app.services.rag_service import cleanup_inactive_collections
@@ -28,14 +30,46 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Add Trusted Host middleware
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=settings.allowed_hosts,
+)
+
 # Add rate limiting middleware
 app.add_middleware(
     RateLimitMiddleware,
     rate_limit=30,  # 30 requests per minute
     window=60,  # 1 minute window
     burst_limit=5,  # Allow 5 burst requests
-    exclude_paths={"/health"}  # Don't rate limit health checks
+    exclude_paths={"/health", "/api/webhook"}  # Don't rate limit health checks and GitHub webhooks
 )
+
+# Global exception handler for 404s
+@app.exception_handler(404)
+async def custom_404_handler(request: Request, exc: HTTPException):
+    return JSONResponse(
+        status_code=404,
+        content={"detail": "Not found"}
+    )
+
+# Global exception handler for 500s
+@app.exception_handler(500)
+async def custom_500_handler(request: Request, exc: HTTPException):
+    logger.error(f"Internal server error: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"}
+    )
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
 
 @app.on_event("startup")
 async def startup_event():

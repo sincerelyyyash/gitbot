@@ -75,6 +75,19 @@ class Settings(BaseSettings):
         description="List of allowed CORS origins"
     )
     
+    # Security Settings
+    allowed_hosts: List[str] = [
+        # "localhost",
+        # "127.0.0.1",
+        # "0.0.0.0",
+        "*.github.com",  # For GitHub webhook calls
+    ]
+    
+    # Rate Limiting
+    rate_limit: int = 30
+    rate_limit_window: int = 60
+    rate_limit_burst: int = 5
+    
     @validator("chromadb_persist_dir", pre=True)
     def set_chromadb_dir(cls, v, values):
         if not v:
