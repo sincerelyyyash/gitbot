@@ -256,10 +256,10 @@ async def initialize_rag_system(
         
         # Initialize LLM with token counter
         llm = ChatGoogleGenerativeAI(
-            model="gemini-pro",
+            model="gemini-2.5-flash",  
             google_api_key=gemini_api_key,
-            temperature=0.1,
-            max_output_tokens=2048,
+            temperature=0.3,  
+            max_output_tokens=64000, 
             convert_system_message_to_human=True,
             callbacks=[TokenCounterCallbackHandler()]
         )

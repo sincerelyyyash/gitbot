@@ -19,8 +19,8 @@ class QuotaUsage:
 class GeminiQuotaManager:
     def __init__(
         self,
-        daily_token_limit: int = 1_000_000,  # Default 1M tokens per day
-        requests_per_minute: int = 60,  # Default 60 RPM
+        daily_token_limit: int = 10_000_000,
+        requests_per_minute: int = 120,
         persist_file: Optional[str] = None
     ):
         self.daily_token_limit = daily_token_limit
