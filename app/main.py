@@ -2,7 +2,7 @@ import logging
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from app.api.webhook import router as webhook_router
 from app.config import settings
 from app.services.rag_service import cleanup_inactive_collections
@@ -63,25 +63,53 @@ async def custom_500_handler(request: Request, exc: HTTPException):
     )
 
 @app.middleware("http")
-async def add_security_headers(request: Request, call_next):
-    response = await call_next(request)
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["X-XSS-Protection"] = "1; mode=block"
-    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-    response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'"
-    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
-    
-    # Block access to .env and other sensitive files
-    path = request.url.path.lower()
-    if any(sensitive in path for sensitive in ['.env', '.git', '.htaccess', 'wp-', 'admin']):
+async def handle_requests(request: Request, call_next):
+    """Global middleware to handle all requests."""
+    try:
+        # Block access to sensitive files
+        path = request.url.path.lower()
+        if any(sensitive in path for sensitive in ['.env', '.git', '.htaccess', 'wp-', 'admin', 'favicon.ico']):
+            return JSONResponse(
+                status_code=403,
+                content={"error": "Access forbidden"}
+            )
+
+        # Add security headers
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        return response
+
+    except Exception as e:
+        logger.exception("Unexpected error in request handler")
         return JSONResponse(
-            status_code=403,
-            content={"detail": "Access forbidden"}
+            status_code=500,
+            content={"error": "Internal server error"}
         )
-    
-    return response
+
+@app.get("/")
+async def root():
+    """Root endpoint that redirects to webhook path."""
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error": "Invalid request",
+            "message": "This endpoint only accepts webhooks at /api/webhook"
+        }
+    )
+
+@app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def catch_all(path: str):
+    """Catch-all route handler for undefined routes."""
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error": "Invalid request",
+            "message": "This endpoint only accepts webhooks at /api/webhook"
+        }
+    )
 
 @app.on_event("startup")
 async def startup_event():
@@ -106,28 +134,6 @@ async def shutdown_event():
         await asyncio.gather(*background_tasks, return_exceptions=True)
     
     logger.info("Shutdown complete")
-
-@app.get("/")
-async def root():
-    """Root endpoint that provides basic API information."""
-    return {
-        "name": "SynapticBot API",
-        "version": "1.0.0",
-        "description": "GitHub App for automated repository assistance",
-        "endpoints": {
-            "/api/webhook": "GitHub webhook endpoint",
-            "/health": "Health check endpoint"
-        }
-    }
-
-@app.get("/health")
-async def health_check():
-    """Health check endpoint for monitoring."""
-    return {
-        "status": "healthy",
-        "version": "1.0.0",
-        "environment": settings.environment
-    }
 
 # Include routers
 app.include_router(webhook_router, prefix="/api")
