@@ -49,15 +49,15 @@ tests/
 
 ### 1. Clone & Configure
 
-```sh
-git clone <repo-url>
+```bash
+git clone https://github.com/sincerelyyyash/gitbot.git
 cd gitbot
 cp .env.example .env  # Fill in your GitHub App and Gemini credentials
 ```
 
 ### 2. Build & Run with Docker
 
-```sh
+```bash
 docker build -t gitbot-backend .
 docker run -p 8000:8000 --env-file .env gitbot-backend
 ```
@@ -69,7 +69,7 @@ docker run -p 8000:8000 --env-file .env gitbot-backend
 
 ### 4. Testing
 
-```sh
+```bash
 pytest tests/
 ```
 
