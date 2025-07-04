@@ -15,23 +15,41 @@ import logging
 import hmac
 import hashlib
 from typing import Optional
+from pydantic import ValidationError
 
 router = APIRouter()
 logger = logging.getLogger("webhook")
 
 def verify_webhook_signature(request_body: bytes, signature: str):
+    """Verify webhook signature using SHA256 or SHA1."""
     if not settings.github_webhook_secret:
         raise ValueError("GITHUB_WEBHOOK_SECRET is not set.")
+        
+    # Get the signature algorithm and hash
     if signature.startswith("sha256="):
-        signature = signature[7:]
+        algorithm = hashlib.sha256
+        sig = signature[7:]  # Remove 'sha256=' prefix
+    elif signature.startswith("sha1="):
+        algorithm = hashlib.sha1
+        sig = signature[5:]  # Remove 'sha1=' prefix
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unsupported signature format"
+        )
+    
+    # Calculate expected signature
     mac = hmac.new(
         settings.github_webhook_secret.encode("utf-8"),
         msg=request_body,
-        digestmod=hashlib.sha256,
+        digestmod=algorithm,
     )
-    if not hmac.compare_digest(mac.hexdigest(), signature):
+    
+    # Compare signatures using constant-time comparison
+    if not hmac.compare_digest(mac.hexdigest(), sig):
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid webhook signature"
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid webhook signature"
         )
 
 @router.post("/webhook")
@@ -67,21 +85,30 @@ async def github_webhook(request: Request):
 
         # Verify signature if secret is configured
         if settings.github_webhook_secret:
-            signature = request.headers.get("X-Hub-Signature-256")
+            # Try SHA256 first, then fall back to SHA1
+            signature = request.headers.get("X-Hub-Signature-256") or request.headers.get("X-Hub-Signature")
+            
             if not signature:
                 logger.warning("Missing webhook signature")
                 return JSONResponse(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    content={"detail": "Missing X-Hub-Signature-256 header"}
+                    content={"detail": "Missing webhook signature"}
                 )
             
             try:
                 verify_webhook_signature(request_body, signature)
+                logger.debug("Webhook signature verified successfully")
             except ValueError as e:
                 logger.error(f"Signature verification failed: {str(e)}")
                 return JSONResponse(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    content={"detail": "Invalid webhook signature"}
+                    content={"detail": str(e)}
+                )
+            except HTTPException as e:
+                logger.error(f"Signature verification failed: {e.detail}")
+                return JSONResponse(
+                    status_code=e.status_code,
+                    content={"detail": e.detail}
                 )
         else:
             logger.warning("Webhook secret not configured - skipping signature verification")
@@ -89,6 +116,7 @@ async def github_webhook(request: Request):
         # Parse JSON payload
         try:
             payload = await request.json()
+            logger.debug(f"Parsed payload: {payload}")
         except Exception as e:
             logger.error(f"Failed to parse JSON payload: {str(e)}")
             return JSONResponse(
@@ -117,6 +145,12 @@ async def github_webhook(request: Request):
                     status_code=status.HTTP_202_ACCEPTED,
                     content={"detail": f"Event type {event_type} is not handled"}
                 )
+        except ValidationError as e:
+            logger.error(f"Payload validation error: {str(e)}")
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"detail": f"Invalid payload format: {str(e)}"}
+            )
         except Exception as e:
             logger.exception(f"Error processing {event_type} event")
             return JSONResponse(

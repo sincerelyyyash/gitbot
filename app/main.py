@@ -66,37 +66,60 @@ async def custom_500_handler(request: Request, exc: HTTPException):
 async def handle_requests(request: Request, call_next):
     """Global middleware to handle all requests."""
     try:
-        # Block access to sensitive files
+        # Block access to sensitive files and common attack vectors
         path = request.url.path.lower()
-        if any(sensitive in path for sensitive in ['.env', '.git', '.htaccess', 'wp-', 'admin', 'favicon.ico']):
+        sensitive_patterns = [
+            '.env', '.git', '.htaccess', 'wp-', 'admin', 'favicon.ico',
+            'actuator', 'ecp', '.ds_store', '.vscode', 'telescope',
+            'info.php', 'server-status', '_all_dbs', 'rest_route'
+        ]
+        
+        # Return 404 for these paths to avoid information disclosure
+        if any(pattern in path for pattern in sensitive_patterns):
             return JSONResponse(
-                status_code=403,
-                content={"error": "Access forbidden"}
+                status_code=404,
+                content={"error": "Not found"}
             )
 
         # Add security headers
         response = await call_next(request)
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["X-XSS-Protection"] = "1; mode=block"
-        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        
+        # Security headers
+        security_headers = {
+            "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "DENY",
+            "X-XSS-Protection": "1; mode=block",
+            "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+            "Content-Security-Policy": "default-src 'self'",
+            "Referrer-Policy": "strict-origin-when-cross-origin",
+            "Permissions-Policy": "geolocation=(), microphone=()"
+        }
+        
+        for header, value in security_headers.items():
+            response.headers[header] = value
+            
         return response
 
     except Exception as e:
         logger.exception("Unexpected error in request handler")
         return JSONResponse(
             status_code=500,
-            content={"error": "Internal server error"}
+            content={"error": "Internal server error", "detail": str(e) if settings.debug else None}
         )
 
 @app.get("/")
 async def root():
-    """Root endpoint that redirects to webhook path."""
+    """Root endpoint that provides API information."""
     return JSONResponse(
-        status_code=400,
+        status_code=200,
         content={
-            "error": "Invalid request",
-            "message": "This endpoint only accepts webhooks at /api/webhook"
+            "name": "GitBot API",
+            "version": "1.0",
+            "description": "GitHub App for automated repository assistance",
+            "endpoints": {
+                "webhook": "/api/webhook",
+                "health": "/health"
+            }
         }
     )
 
@@ -104,10 +127,10 @@ async def root():
 async def catch_all(path: str):
     """Catch-all route handler for undefined routes."""
     return JSONResponse(
-        status_code=400,
+        status_code=404,
         content={
-            "error": "Invalid request",
-            "message": "This endpoint only accepts webhooks at /api/webhook"
+            "error": "Not found",
+            "message": "This endpoint does not exist. The API webhook endpoint is at /api/webhook"
         }
     )
 
