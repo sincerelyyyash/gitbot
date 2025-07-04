@@ -74,7 +74,7 @@ async def get_or_init_repo_knowledge_base(
     logger.info(f"Collection name: {collection_name}, Persist dir: {persist_dir}")
     
     # Get GitHub client for content fetching
-    client = get_github_app_installation_client(
+    client = await get_github_app_installation_client(
         settings.github_app_id, 
         settings.github_private_key, 
         installation_id
@@ -238,7 +238,7 @@ async def handle_push_event(payload: PushPayload):
         return
     
     # Get GitHub client
-    client = get_github_app_installation_client(
+    client = await get_github_app_installation_client(
         settings.github_app_id,
         settings.github_private_key,
         installation_id
@@ -369,7 +369,7 @@ async def handle_issue_comment_event(payload: IssueCommentPayload):
     
     # Check quota before proceeding
     if not await quota_manager.check_quota(repo_full_name):
-        client = get_github_app_installation_client(
+        client = await get_github_app_installation_client(
             settings.github_app_id,
             settings.github_private_key,
             installation_id
@@ -425,7 +425,7 @@ async def handle_issue_comment_event(payload: IssueCommentPayload):
         answer, usage_stats = await query_rag_system(rag, comment, repo_full_name)
         
         # Post response
-        client = get_github_app_installation_client(
+        client = await get_github_app_installation_client(
             settings.github_app_id,
             settings.github_private_key,
             installation_id
@@ -439,7 +439,7 @@ async def handle_issue_comment_event(payload: IssueCommentPayload):
     except Exception as e:
         logger.exception(f"Error processing comment for {repo_full_name}")
         # Post error message
-        client = get_github_app_installation_client(
+        client = await get_github_app_installation_client(
             settings.github_app_id,
             settings.github_private_key,
             installation_id

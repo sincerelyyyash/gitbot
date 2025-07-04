@@ -102,10 +102,21 @@ class Settings(BaseSettings):
     
     @validator("github_private_key")
     def validate_private_key(cls, v):
-        v = v.strip()
-        # If key is not in PEM format, wrap it
+        """Validate and format the GitHub private key."""
+        if not v:
+            raise ValueError("GitHub private key is required")
+        
+        # Remove any whitespace and normalize newlines
+        v = v.strip().replace('\r\n', '\n').replace('\r', '\n')
+        
+        # If key is already in PEM format, return as is
+        if v.startswith("-----BEGIN RSA PRIVATE KEY-----"):
+            return v
+        
+        # If key is base64 only, wrap in PEM format
         if not v.startswith("-----BEGIN"):
             v = f"-----BEGIN RSA PRIVATE KEY-----\n{v}\n-----END RSA PRIVATE KEY-----"
+        
         return v
     
     @validator("log_level")

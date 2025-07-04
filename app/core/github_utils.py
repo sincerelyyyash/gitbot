@@ -69,26 +69,23 @@ async def get_github_app_installation_client(
 ) -> Optional[Github]:
     """Get an authenticated GitHub client for an installation."""
     try:
-        # Generate JWT
-        now = int(time.time())
-        payload = {
-            "iat": now,
-            "exp": now + 600,
-            "iss": app_id
-        }
-        jwt_token = jwt.encode(payload, private_key, algorithm="RS256")
-        
-        # Create GitHub integration
+        # Create GitHub integration directly with app auth
         git_integration = GithubIntegration(
-            app_id,
-            jwt_token
+            auth=Auth.AppAuth(
+                app_id=app_id,
+                private_key=private_key
+            )
         )
         
-        # Get installation access token
-        access_token = git_integration.get_access_token(installation_id).token
-        
-        # Create and return GitHub client
-        return Github(auth=Auth.Token(access_token))
+        try:
+            # Get installation access token
+            access_token = git_integration.get_access_token(installation_id).token
+            
+            # Create and return GitHub client
+            return Github(auth=Auth.Token(access_token))
+        except Exception as e:
+            logger.error(f"GitHub integration failed: {str(e)}")
+            return None
     
     except Exception as e:
         logger.error(f"Failed to get GitHub client: {str(e)}")
