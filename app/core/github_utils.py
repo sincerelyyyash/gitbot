@@ -44,10 +44,10 @@ EXCLUDED_PATTERNS = {
     'package-lock.json', 'yarn.lock', 'poetry.lock', 'Pipfile.lock'
 }
 
-def generate_jwt_token(app_id: str, private_key_path: str) -> Optional[str]:
+def generate_jwt_token(app_id: str, private_key: str) -> Optional[str]:
+    """Generate a JWT token for GitHub App authentication using the private key string."""
     try:
-        with open(private_key_path, "r") as key_file:
-            private_key = key_file.read()
+        # Use the private key directly from settings
         now = int(time.time())
         payload = {
             "iat": now - 60,
@@ -58,7 +58,7 @@ def generate_jwt_token(app_id: str, private_key_path: str) -> Optional[str]:
         logger.info("Generated JWT for GitHub App authentication.")
         return encoded_jwt if isinstance(encoded_jwt, str) else encoded_jwt.decode("utf-8")
     except Exception as e:
-        logger.exception("Failed to generate JWT token.")
+        logger.exception(f"Failed to generate JWT token: {str(e)}")
         return None
 
 @github_rate_limiter.with_rate_limit(category="core")
@@ -88,10 +88,10 @@ async def get_github_app_installation_client(
         access_token = git_integration.get_access_token(installation_id).token
         
         # Create and return GitHub client
-        return Github(access_token)
+        return Github(auth=Auth.Token(access_token))
     
     except Exception as e:
-        logger.error(f"Failed to get GitHub client: {e}")
+        logger.error(f"Failed to get GitHub client: {str(e)}")
         return None
 
 @github_rate_limiter.with_rate_limit(category="core")

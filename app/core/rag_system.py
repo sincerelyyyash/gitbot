@@ -208,8 +208,21 @@ async def initialize_rag_system(
         # Initialize embeddings
         embeddings = GoogleGenerativeAIEmbeddings(
             google_api_key=gemini_api_key,
-            model="models/embedding-001"
+            model="models/embedding-001",
+            task_type="retrieval_query"  
         )
+        
+        # Wrap embeddings in a ChromaDB-compatible class
+        class ChromaEmbeddingFunction:
+            def __init__(self, embeddings):
+                self.embeddings = embeddings
+            
+            def __call__(self, input: Union[str, List[str]]) -> List[List[float]]:
+                if isinstance(input, str):
+                    input = [input]
+                return self.embeddings.embed_documents(input)
+        
+        chroma_embeddings = ChromaEmbeddingFunction(embeddings)
         
         # Set up persistent ChromaDB client
         chroma_client = _setup_persistent_chromadb(chroma_persist_dir)
@@ -218,7 +231,7 @@ async def initialize_rag_system(
         collection = _get_or_create_collection(
             chroma_client,
             collection_name,
-            embeddings,
+            chroma_embeddings,
             reset_collection=reset_collection
         )
         
@@ -226,7 +239,7 @@ async def initialize_rag_system(
         vectorstore = Chroma(
             client=chroma_client,
             collection_name=collection_name,
-            embedding_function=embeddings,
+            embedding_function=chroma_embeddings,
             persist_directory=chroma_persist_dir
         )
         

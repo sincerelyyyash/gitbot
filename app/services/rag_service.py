@@ -467,6 +467,15 @@ async def handle_issue_event(payload: IssuesPayload):
         logger.info(f"Ignoring issue action '{payload.action}' for issue #{issue_number}")
         return
     
+    client = await get_github_app_installation_client(
+        settings.github_app_id,
+        settings.github_private_key,
+        installation_id
+    )
+    if not client:
+        logger.error("Failed to initialize GitHub client")
+        return
+    
     # Prepare current context documents
     current_documents = []
     if issue_body.strip():
@@ -485,20 +494,14 @@ async def handle_issue_event(payload: IssuesPayload):
         repo_full_name,
         installation_id,
         include_current_content=True,
-        current_documents_data=current_documents
+        current_documents_data=current_documents,
+        github_client=client  # Pass the initialized client
     )
     
     if not rag:
         logger.error(f"Could not initialize RAG system for {repo_full_name}")
-        # Post a fallback message
-        client = await get_github_app_installation_client(
-            settings.github_app_id, 
-            settings.github_private_key, 
-            installation_id
-        )
-        if client:
-            fallback_message = "Welcome! I'm currently setting up the knowledge base for this repository. Please try asking questions in a few minutes."
-            await post_issue_comment(client, repo_full_name, issue_number, fallback_message)
+        fallback_message = "Welcome! I'm currently setting up the knowledge base for this repository. Please try asking questions in a few minutes."
+        await post_issue_comment(client, repo_full_name, issue_number, fallback_message)
         return
     
     # Create a contextual query for the new issue

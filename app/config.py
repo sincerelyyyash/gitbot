@@ -89,8 +89,10 @@ class Settings(BaseSettings):
     
     @validator("github_private_key")
     def validate_private_key(cls, v):
-        if not v.strip().startswith("-----BEGIN RSA PRIVATE KEY-----"):
-            raise ValueError("Invalid private key format")
+        v = v.strip()
+        # If key is not in PEM format, wrap it
+        if not v.startswith("-----BEGIN"):
+            v = f"-----BEGIN RSA PRIVATE KEY-----\n{v}\n-----END RSA PRIVATE KEY-----"
         return v
     
     @validator("log_level")
