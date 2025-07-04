@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.git/
+.cursor/
+.DS_Store
+.env
+.env.*
+.gitignore
+README.md
+docs/ 
