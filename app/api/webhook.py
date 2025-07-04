@@ -86,7 +86,9 @@ async def github_webhook(request: Request):
         # Verify signature if secret is configured
         if settings.github_webhook_secret:
             # Try SHA256 first, then fall back to SHA1
-            signature = request.headers.get("X-Hub-Signature-256") or request.headers.get("X-Hub-Signature")
+            signature_256 = request.headers.get("X-Hub-Signature-256")
+            signature_1 = request.headers.get("X-Hub-Signature")
+            signature = signature_256 or signature_1
             
             if not signature:
                 logger.warning("Missing webhook signature")
@@ -97,7 +99,7 @@ async def github_webhook(request: Request):
             
             try:
                 verify_webhook_signature(request_body, signature)
-                logger.debug("Webhook signature verified successfully")
+                logger.debug(f"Webhook signature verified successfully")
             except ValueError as e:
                 logger.error(f"Signature verification failed: {str(e)}")
                 return JSONResponse(
@@ -116,7 +118,6 @@ async def github_webhook(request: Request):
         # Parse JSON payload
         try:
             payload = await request.json()
-            logger.debug(f"Parsed payload: {payload}")
         except Exception as e:
             logger.error(f"Failed to parse JSON payload: {str(e)}")
             return JSONResponse(
@@ -124,13 +125,15 @@ async def github_webhook(request: Request):
                 content={"detail": "Invalid JSON payload"}
             )
 
-        # Log successful payload parsing
-        logger.info(f"Successfully parsed {event_type} event payload")
-        logger.debug(f"Event action: {payload.get('action')}")
-        
         # Handle different event types
         try:
-            if event_type == "issue_comment":
+            if event_type == "ping":
+                logger.info("Received ping event")
+                return JSONResponse(
+                    status_code=status.HTTP_200_OK,
+                    content={"detail": "Pong! Webhook received successfully"}
+                )
+            elif event_type == "issue_comment":
                 data = IssueCommentPayload(**payload)
                 await handle_issue_comment_event(data)
             elif event_type == "issues":
