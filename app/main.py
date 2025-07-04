@@ -69,6 +69,18 @@ async def add_security_headers(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+    
+    # Block access to .env and other sensitive files
+    path = request.url.path.lower()
+    if any(sensitive in path for sensitive in ['.env', '.git', '.htaccess', 'wp-', 'admin']):
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "Access forbidden"}
+        )
+    
     return response
 
 @app.on_event("startup")
@@ -94,6 +106,19 @@ async def shutdown_event():
         await asyncio.gather(*background_tasks, return_exceptions=True)
     
     logger.info("Shutdown complete")
+
+@app.get("/")
+async def root():
+    """Root endpoint that provides basic API information."""
+    return {
+        "name": "SynapticBot API",
+        "version": "1.0.0",
+        "description": "GitHub App for automated repository assistance",
+        "endpoints": {
+            "/api/webhook": "GitHub webhook endpoint",
+            "/health": "Health check endpoint"
+        }
+    }
 
 @app.get("/health")
 async def health_check():

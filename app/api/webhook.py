@@ -38,46 +38,67 @@ def verify_webhook_signature(request_body: bytes, signature: str):
 async def github_webhook(request: Request):
     """Handle GitHub webhook events."""
     try:
-        # Verify signature
-        signature = request.headers.get("X-Hub-Signature-256")
-        if not signature:
-            logger.warning("Webhook request missing signature")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED, 
-                detail="Missing X-Hub-Signature-256 header"
-            )
+        # Log request info
+        headers = dict(request.headers)
+        logger.info(f"Received webhook request from {request.client.host}")
+        logger.debug(f"Headers: {headers}")
         
-        # Get event type
+        # Get event type first - we want to log this even if other validations fail
         event_type = request.headers.get("X-GitHub-Event")
-        if not event_type:
-            logger.warning("Webhook request missing event type")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, 
-                detail="Missing X-GitHub-Event header"
+        if event_type:
+            logger.info(f"GitHub event type: {event_type}")
+        else:
+            logger.warning("Missing X-GitHub-Event header")
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"detail": "Missing X-GitHub-Event header"}
             )
-            
-        # Read and verify request body
-        request_body = await request.body()
+
+        # Read request body early so we can log issues
         try:
-            verify_webhook_signature(request_body, signature)
-        except ValueError as e:
-            logger.error(f"Webhook signature verification failed: {str(e)}")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED, 
-                detail="Invalid webhook signature"
+            request_body = await request.body()
+            logger.debug(f"Received payload size: {len(request_body)} bytes")
+        except Exception as e:
+            logger.error(f"Failed to read request body: {str(e)}")
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"detail": "Failed to read request body"}
             )
-        
-        # Parse payload
+
+        # Verify signature if secret is configured
+        if settings.github_webhook_secret:
+            signature = request.headers.get("X-Hub-Signature-256")
+            if not signature:
+                logger.warning("Missing webhook signature")
+                return JSONResponse(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    content={"detail": "Missing X-Hub-Signature-256 header"}
+                )
+            
+            try:
+                verify_webhook_signature(request_body, signature)
+            except ValueError as e:
+                logger.error(f"Signature verification failed: {str(e)}")
+                return JSONResponse(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    content={"detail": "Invalid webhook signature"}
+                )
+        else:
+            logger.warning("Webhook secret not configured - skipping signature verification")
+
+        # Parse JSON payload
         try:
             payload = await request.json()
         except Exception as e:
-            logger.error(f"Failed to parse webhook payload: {str(e)}")
-            raise HTTPException(
+            logger.error(f"Failed to parse JSON payload: {str(e)}")
+            return JSONResponse(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid JSON payload"
+                content={"detail": "Invalid JSON payload"}
             )
-            
-        logger.info(f"Received GitHub event: {event_type}")
+
+        # Log successful payload parsing
+        logger.info(f"Successfully parsed {event_type} event payload")
+        logger.debug(f"Event action: {payload.get('action')}")
         
         # Handle different event types
         try:
@@ -92,26 +113,27 @@ async def github_webhook(request: Request):
                 await handle_push_event(data)
             else:
                 logger.info(f"Unhandled event type: {event_type}")
-                return PlainTextResponse(
-                    f"Webhook received but event type {event_type} is not handled", 
-                    status_code=202
+                return JSONResponse(
+                    status_code=status.HTTP_202_ACCEPTED,
+                    content={"detail": f"Event type {event_type} is not handled"}
                 )
         except Exception as e:
             logger.exception(f"Error processing {event_type} event")
-            raise HTTPException(
+            return JSONResponse(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error processing webhook: {str(e)}"
+                content={"detail": f"Error processing webhook: {str(e)}"}
             )
         
-        return PlainTextResponse("Webhook received and processed", status_code=200)
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={"detail": f"Successfully processed {event_type} event"}
+        )
         
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.exception("Unexpected error processing webhook")
-        raise HTTPException(
+        logger.exception("Unexpected error in webhook handler")
+        return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Internal server error: {str(e)}"
+            content={"detail": f"Internal server error: {str(e)}"}
         )
 
 # Admin endpoints for collection management
