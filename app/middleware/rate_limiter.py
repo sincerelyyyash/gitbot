@@ -1,4 +1,5 @@
 from fastapi import Request, HTTPException, status
+from starlette.middleware.base import BaseHTTPMiddleware
 from typing import Optional, Callable, Dict
 import time
 import asyncio
@@ -71,16 +72,18 @@ class RateLimiter:
                 "reset_in_seconds": int(reset_in),
             }
 
-class RateLimitMiddleware:
+class RateLimitMiddleware(BaseHTTPMiddleware):
     """FastAPI middleware for rate limiting."""
     
     def __init__(
         self,
+        app,
         rate_limit: int = 30,
         window: int = 60,
         burst_limit: int = 5,
         exclude_paths: Optional[set[str]] = None
     ):
+        super().__init__(app)
         self.rate_limiter = RateLimiter(rate_limit, window, burst_limit)
         self.exclude_paths = exclude_paths or set()
     
@@ -100,7 +103,7 @@ class RateLimitMiddleware:
             return f"ip:{forwarded.split(',')[0].strip()}"
         return f"ip:{request.client.host}"
     
-    async def __call__(self, request: Request, call_next: Callable):
+    async def dispatch(self, request: Request, call_next: Callable):
         """Apply rate limiting to requests."""
         # Skip excluded paths
         if request.url.path in self.exclude_paths:

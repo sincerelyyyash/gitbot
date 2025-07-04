@@ -54,7 +54,7 @@ async def get_or_init_repo_knowledge_base(
         force_refresh: Whether to force refresh of the collection
     """
     collection_name = _sanitize_collection_name(repo_full_name)
-    persist_dir = os.path.join(settings.chromadb_persist_directory, "repositories")
+    persist_dir = os.path.join(settings.chromadb_persist_dir, "repositories")
     
     # Check if we have this repository in memory and it's still valid
     if (not force_refresh and 
@@ -108,20 +108,77 @@ async def get_or_init_repo_knowledge_base(
         else:
             # Fetch comprehensive repository content
             logger.info(f"Fetching repository content for {repo_full_name}")
-            repo_documents = await fetch_all_repository_content(
+            repo_content = await fetch_all_repository_content(
                 client=client,
                 repo_full_name=repo_full_name,
-                include_files=True,
                 include_issues=True,
-                include_prs=True,
-                include_metadata=True,
-                # Configurable limits to manage API usage and storage
-                max_files=300,  # Reasonable limit for code files
-                max_issues=50,  # Recent issues for context
-                max_prs=25,     # Recent PRs for context
-                max_file_size=512 * 1024,  # 512KB max file size
-                state="all"     # Include both open and closed issues/PRs
+                include_pulls=True,
+                max_items=50
             )
+            
+            # Convert the content into documents
+            repo_documents = []
+            
+            # Add files
+            for file in repo_content["files"]:
+                repo_documents.append({
+                    "content": file["content"],
+                    "metadata": {
+                        "type": "file",
+                        "file_path": file["path"],
+                        "repository": repo_full_name
+                    }
+                })
+            
+            # Add issues
+            for issue in repo_content["issues"]:
+                if issue.get("body"):
+                    repo_documents.append({
+                        "content": f"Issue #{issue['number']}: {issue['title']}\n\n{issue['body']}",
+                        "metadata": {
+                            "type": "issue",
+                            "issue_number": issue["number"],
+                            "repository": repo_full_name,
+                            "created_at": issue["created_at"]
+                        }
+                    })
+                    # Add issue comments
+                    for comment in issue.get("comments", []):
+                        if comment.get("body"):
+                            repo_documents.append({
+                                "content": f"Comment on Issue #{issue['number']}:\n\n{comment['body']}",
+                                "metadata": {
+                                    "type": "issue_comment",
+                                    "issue_number": issue["number"],
+                                    "repository": repo_full_name,
+                                    "created_at": comment["created_at"]
+                                }
+                            })
+            
+            # Add pull requests
+            for pr in repo_content["pulls"]:
+                if pr.get("body"):
+                    repo_documents.append({
+                        "content": f"Pull Request #{pr['number']}: {pr['title']}\n\n{pr['body']}",
+                        "metadata": {
+                            "type": "pull_request",
+                            "pr_number": pr["number"],
+                            "repository": repo_full_name,
+                            "created_at": pr["created_at"]
+                        }
+                    })
+                    # Add PR comments
+                    for comment in pr.get("comments", []):
+                        if comment.get("body"):
+                            repo_documents.append({
+                                "content": f"Comment on PR #{pr['number']}:\n\n{comment['body']}",
+                                "metadata": {
+                                    "type": "pr_comment",
+                                    "pr_number": pr["number"],
+                                    "repository": repo_full_name,
+                                    "created_at": comment["created_at"]
+                                }
+                            })
             
             logger.info(f"Fetched {len(repo_documents)} documents from repository {repo_full_name}")
             
@@ -434,7 +491,7 @@ async def handle_issue_event(payload: IssuesPayload):
     if not rag:
         logger.error(f"Could not initialize RAG system for {repo_full_name}")
         # Post a fallback message
-        client = get_github_app_installation_client(
+        client = await get_github_app_installation_client(
             settings.github_app_id, 
             settings.github_private_key, 
             installation_id
@@ -473,7 +530,7 @@ async def handle_issue_event(payload: IssuesPayload):
         answer = "Thank you for opening this issue! I'm currently processing the repository content and will be able to provide more helpful responses soon."
     
     # Get GitHub client for posting response
-    client = get_github_app_installation_client(
+    client = await get_github_app_installation_client(
         settings.github_app_id, 
         settings.github_private_key, 
         installation_id
@@ -521,7 +578,7 @@ async def get_repository_collection_info(repo_full_name: str) -> dict:
     
     # Try to get info from persistent storage
     collection_name = _sanitize_collection_name(repo_full_name)
-    persist_dir = os.path.join(settings.chromadb_persist_directory, "repositories")
+    persist_dir = os.path.join(settings.chromadb_persist_dir, "repositories")
     
     existing_collections = await list_collections(persist_dir)
     existing_collection = next(
@@ -551,7 +608,7 @@ async def delete_repository_collection(repo_full_name: str) -> bool:
     
     # Delete persistent collection
     collection_name = _sanitize_collection_name(repo_full_name)
-    persist_dir = os.path.join(settings.chromadb_persist_directory, "repositories")
+    persist_dir = os.path.join(settings.chromadb_persist_dir, "repositories")
     
     success = await delete_collection(collection_name, persist_dir)
     
@@ -566,5 +623,5 @@ async def list_all_repository_collections() -> list:
     """
     List all repository collections in the ChromaDB instance.
     """
-    persist_dir = os.path.join(settings.chromadb_persist_directory, "repositories")
+    persist_dir = os.path.join(settings.chromadb_persist_dir, "repositories")
     return await list_collections(persist_dir) 
