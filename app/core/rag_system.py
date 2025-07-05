@@ -15,6 +15,7 @@ import shutil
 import logging
 import asyncio
 from app.core.quota_manager import quota_manager
+from chromadb.db.base import UniqueConstraintError
 
 def _mask_api_key(api_key: str) -> str:
     if not api_key or len(api_key) < 8:
@@ -111,23 +112,31 @@ def _get_or_create_collection(
                 logging.info(f"Deleted existing collection: {collection_name}")
             except Exception:
                 pass  # Collection might not exist
-        
         # Try to get existing collection
         collection = client.get_collection(
             name=collection_name,
             embedding_function=embedding_function
         )
         logging.info(f"Retrieved existing collection: {collection_name}")
-        
-    except Exception:
-        # Collection doesn't exist, create it
-        collection = client.create_collection(
-            name=collection_name,
-            embedding_function=embedding_function,
-            metadata={"hnsw:space": "cosine"}  # Use cosine similarity
-        )
-        logging.info(f"Created new collection: {collection_name}")
-    
+    except Exception as e:
+        # Try to create collection, handle UniqueConstraintError
+        try:
+            collection = client.create_collection(
+                name=collection_name,
+                embedding_function=embedding_function,
+                metadata={"hnsw:space": "cosine"}
+            )
+            logging.info(f"Created new collection: {collection_name}")
+        except UniqueConstraintError:
+            # Collection already exists, get it
+            collection = client.get_collection(
+                name=collection_name,
+                embedding_function=embedding_function
+            )
+            logging.info(f"Collection {collection_name} already exists, retrieved instead.")
+        except Exception as ce:
+            logging.error(f"Failed to create or get collection: {collection_name}: {ce}")
+            raise
     return collection
 
 class TokenCounterCallbackHandler:
@@ -216,15 +225,13 @@ async def initialize_rag_system(
         class ChromaEmbeddingFunction:
             def __init__(self, embeddings):
                 self.embeddings = embeddings
-            
-            def __call__(self, input_texts: Union[str, List[str]]) -> List[List[float]]:
-                if isinstance(input_texts, str):
-                    input_texts = [input_texts]
-                return self.embeddings.embed_documents(input_texts)
-
+            # ChromaDB expects __call__(self, input)
+            def __call__(self, input: Union[str, List[str]]) -> List[List[float]]:
+                if isinstance(input, str):
+                    input = [input]
+                return self.embeddings.embed_documents(input)
             def embed_documents(self, texts: List[str]) -> List[List[float]]:
                 return self.__call__(texts)
-
             def embed_query(self, text: str) -> List[float]:
                 return self.embeddings.embed_query(text)
         
