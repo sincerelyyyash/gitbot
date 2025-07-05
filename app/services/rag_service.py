@@ -156,110 +156,86 @@ async def get_or_init_repo_knowledge_base(
         return None
     
     try:
-        # Check if we have existing collection data
-        existing_collections = await list_collections(persist_dir)
-        existing_collection = next(
-            (col for col in existing_collections if col["name"] == collection_name), 
-            None
+        # Fetch comprehensive repository content
+        logger.info(f"Fetching repository content for {repo_full_name}")
+        repo_content = await fetch_all_repository_content(
+            client=client,
+            repo_full_name=repo_full_name,
+            include_issues=True,
+            include_pulls=True,
+            max_items=50
         )
         
-        reset_collection = force_refresh
+        # Convert the content into documents
         repo_documents = []
         
-        if existing_collection and not force_refresh:
-            logger.info(f"Found existing collection '{collection_name}' with {existing_collection['count']} documents")
-            # Use existing collection, only fetch current content
-            if include_current_content and current_documents_data:
-                repo_documents = current_documents_data
-            else:
-                # Create minimal placeholder for existing collection
-                repo_documents = [{
-                    "content": f"Repository: {repo_full_name}\nUsing existing knowledge base.",
-                    "metadata": {"type": "placeholder", "repository": repo_full_name}
-                }]
-        else:
-            # Fetch comprehensive repository content
-            logger.info(f"Fetching repository content for {repo_full_name}")
-            repo_content = await fetch_all_repository_content(
-                client=client,
-                repo_full_name=repo_full_name,
-                include_issues=True,
-                include_pulls=True,
-                max_items=50
-            )
-            
-            # Convert the content into documents
-            repo_documents = []
-            
-            # Add files
-            for file in repo_content["files"]:
+        # Add files
+        for file in repo_content.get("files", []):
+            repo_documents.append({
+                "content": file["content"],
+                "metadata": {
+                    "type": "file",
+                    "file_path": file["path"],
+                    "repository": repo_full_name
+                }
+            })
+        
+        # Add issues
+        for issue in repo_content.get("issues", []):
+            if issue.get("body"):
                 repo_documents.append({
-                    "content": file["content"],
+                    "content": f"Issue #{issue['number']}: {issue['title']}\n\n{issue['body']}",
                     "metadata": {
-                        "type": "file",
-                        "file_path": file["path"],
-                        "repository": repo_full_name
+                        "type": "issue",
+                        "issue_number": issue["number"],
+                        "repository": repo_full_name,
+                        "created_at": issue["created_at"]
                     }
                 })
-            
-            # Add issues
-            for issue in repo_content["issues"]:
-                if issue.get("body"):
-                    repo_documents.append({
-                        "content": f"Issue #{issue['number']}: {issue['title']}\n\n{issue['body']}",
-                        "metadata": {
-                            "type": "issue",
-                            "issue_number": issue["number"],
-                            "repository": repo_full_name,
-                            "created_at": issue["created_at"]
-                        }
-                    })
-                    # Add issue comments
-                    for comment in issue.get("comments", []):
-                        if comment.get("body"):
-                            repo_documents.append({
-                                "content": f"Comment on Issue #{issue['number']}:\n\n{comment['body']}",
-                                "metadata": {
-                                    "type": "issue_comment",
-                                    "issue_number": issue["number"],
-                                    "repository": repo_full_name,
-                                    "created_at": comment["created_at"]
-                                }
-                            })
-            
-            # Add pull requests
-            for pr in repo_content["pulls"]:
-                if pr.get("body"):
-                    repo_documents.append({
-                        "content": f"Pull Request #{pr['number']}: {pr['title']}\n\n{pr['body']}",
-                        "metadata": {
-                            "type": "pull_request",
-                            "pr_number": pr["number"],
-                            "repository": repo_full_name,
-                            "created_at": pr["created_at"]
-                        }
-                    })
-                    # Add PR comments
-                    for comment in pr.get("comments", []):
-                        if comment.get("body"):
-                            repo_documents.append({
-                                "content": f"Comment on PR #{pr['number']}:\n\n{comment['body']}",
-                                "metadata": {
-                                    "type": "pr_comment",
-                                    "pr_number": pr["number"],
-                                    "repository": repo_full_name,
-                                    "created_at": comment["created_at"]
-                                }
-                            })
-            
-            logger.info(f"Fetched {len(repo_documents)} documents from repository {repo_full_name}")
-            
-            # Add current content if provided
-            if include_current_content and current_documents_data:
-                repo_documents.extend(current_documents_data)
-                logger.info(f"Added {len(current_documents_data)} current context documents")
-            
-            reset_collection = True  # We're adding new content
+                # Add issue comments
+                for comment in issue.get("comments", []):
+                    if comment.get("body"):
+                        repo_documents.append({
+                            "content": f"Comment on Issue #{issue['number']}:\n\n{comment['body']}",
+                            "metadata": {
+                                "type": "issue_comment",
+                                "issue_number": issue["number"],
+                                "repository": repo_full_name,
+                                "created_at": comment["created_at"]
+                            }
+                        })
+        
+        # Add pull requests
+        for pr in repo_content.get("pulls", []):
+            if pr.get("body"):
+                repo_documents.append({
+                    "content": f"Pull Request #{pr['number']}: {pr['title']}\n\n{pr['body']}",
+                    "metadata": {
+                        "type": "pull_request",
+                        "pr_number": pr["number"],
+                        "repository": repo_full_name,
+                        "created_at": pr["created_at"]
+                    }
+                })
+                # Add PR comments
+                for comment in pr.get("comments", []):
+                    if comment.get("body"):
+                        repo_documents.append({
+                            "content": f"Comment on PR #{pr['number']}:\n\n{comment['body']}",
+                            "metadata": {
+                                "type": "pr_comment",
+                                "pr_number": pr["number"],
+                                "repository": repo_full_name,
+                                "created_at": comment["created_at"]
+                            }
+                        })
+        
+        logger.info(f"Fetched {len(repo_documents)} documents from repository {repo_full_name}")
+        
+        # Add current content if provided
+        if include_current_content and current_documents_data:
+            repo_documents.extend(current_documents_data)
+            logger.info(f"Added {len(current_documents_data)} current context documents")
         
         # Ensure we have some content to work with
         if not repo_documents:
@@ -269,13 +245,13 @@ async def get_or_init_repo_knowledge_base(
                 "metadata": {"type": "placeholder", "repository": repo_full_name}
             }]
         
-        # Initialize RAG system with persistent storage
+        # Initialize RAG system, resetting the collection to ensure a fresh start
         rag_result = await initialize_rag_system(
             documents_data=repo_documents,
             gemini_api_key=settings.gemini_api_key,
             chroma_persist_dir=persist_dir,
             collection_name=collection_name,
-            reset_collection=reset_collection
+            reset_collection=True
         )
         
         if "error" in rag_result:
@@ -285,11 +261,9 @@ async def get_or_init_repo_knowledge_base(
             
             logger.error(f"RAG initialization error for {repo_full_name}: {error_message}")
             
-            # Log suggestions for troubleshooting
             if suggestions:
                 logger.info(f"Suggestions for {repo_full_name}: {'; '.join(suggestions)}")
             
-            # Return error information for better handling
             return {
                 "error": True,
                 "error_type": error_type,
@@ -579,9 +553,26 @@ async def handle_issue_comment_event(payload: IssueCommentPayload):
         if not client:
             logger.error("Failed to initialize GitHub client")
             return
-            
-        # Query RAG system with client for rate limiting
-        result = await query_rag_system(rag, comment, repo_full_name, github_client=client)
+
+        # Build a chat history with the original issue context
+        chat_history = []
+        if issue_content.strip():
+            chat_history.append({
+                "role": "user",
+                "content": f"The original issue is titled '{issue_title}' and has the following content: {issue_content}"
+            })
+
+        # The user's new comment is the question
+        question = comment
+
+        # Query RAG system
+        result = await query_rag_system(
+            rag,
+            question,
+            repo_full_name,
+            chat_history=chat_history,
+            github_client=client
+        )
         
         # Handle both tuple and string returns
         if isinstance(result, tuple):
@@ -640,14 +631,22 @@ async def handle_issue_event(payload: IssuesPayload):
 
     update_repo_activity(repo_full_name)
 
+    # Initialize GitHub client first
+    client = await get_github_app_installation_client(
+        settings.github_app_id,
+        settings.github_private_key,
+        installation_id
+    )
+    if not client:
+        logger.error("Failed to initialize GitHub client")
+        return
+
     # Check for rate limiting
-    if not quota_manager.check_quota(repo_full_name):
+    if not await quota_manager.check_quota(repo_full_name):
         logger.warning(f"Rate limit exceeded for {repo_full_name}. Skipping issue event.")
         if should_send_error_response(repo_full_name, issue.number, "rate_limit"):
             await post_issue_comment(
-                settings.github_app_id,
-                settings.github_private_key,
-                installation_id,
+                client,
                 repo_full_name,
                 issue.number,
                 "I've reached my processing limit for now. Please try again later."
@@ -714,24 +713,25 @@ async def handle_issue_event(payload: IssuesPayload):
     # Query the RAG system
     try:
         result = await query_rag_system(
-            qa_chain=rag_system["qa_chain"],
+            qa_chain_dict=rag_system,
             query=question,
-            chat_history=[]
+            repo_full_name=repo_full_name,
+            chat_history=[],
+            github_client=client
         )
-        answer = result.get("answer", "No answer found.")
+        answer, usage_stats = result if isinstance(result, tuple) else (result, None)
 
         # Post the analysis as a comment
         await post_issue_comment(
-            settings.github_app_id,
-            settings.github_private_key,
-            installation_id,
+            client,
             repo_full_name,
             issue.number,
             f"{answer}\n\n{response_footer}"
         )
         
         # Consume quota on success
-        quota_manager.consume_quota(repo_full_name)
+        if usage_stats:
+            await quota_manager.update_usage(repo_full_name, usage_stats.get('total_tokens', 0))
         reset_error_count(repo_full_name)
 
         logger.info(f"Posted analysis for issue #{issue.number} in {repo_full_name}")
@@ -741,9 +741,7 @@ async def handle_issue_event(payload: IssuesPayload):
         increment_error_count(repo_full_name)
         if should_send_error_response(repo_full_name, issue.number, "rag_error"):
             await post_issue_comment(
-                settings.github_app_id,
-                settings.github_private_key,
-                installation_id,
+                client,
                 repo_full_name,
                 issue.number,
                 "I encountered an error while analyzing this issue. I will try again later."

@@ -1,162 +1,121 @@
-import logging
-from datetime import datetime, timedelta
-import asyncio
-from typing import Dict, Optional
-from dataclasses import dataclass
-import json
 import os
-from pathlib import Path
+import json
+from datetime import datetime, timedelta
+import logging
+from typing import Dict, Optional
+import aiofiles
 
 logger = logging.getLogger("quota_manager")
 
-@dataclass
-class QuotaUsage:
-    tokens_used: int = 0
-    requests_made: int = 0
-    last_reset: datetime = datetime.utcnow()
-    last_request: datetime = datetime.utcnow()
-
 class GeminiQuotaManager:
-    def __init__(
-        self,
-        daily_token_limit: int = 10_000_000,
-        requests_per_minute: int = 120,
-        persist_file: Optional[str] = None
-    ):
-        self.daily_token_limit = daily_token_limit
-        self.requests_per_minute = requests_per_minute
-        self.persist_file = persist_file or "gemini_quota.json"
-        self.usage: Dict[str, QuotaUsage] = {}
-        self._lock = asyncio.Lock()
-        self._load_usage()
-        
-        # Start background task for quota persistence
-        asyncio.create_task(self._periodic_save())
-    
-    def _load_usage(self):
-        """Load quota usage from persistent storage."""
+    def __init__(self, quota_file_path: str = "gemini_quota.json"):
+        self.quota_file_path = os.path.abspath(quota_file_path)
+        self.daily_quota = 60000  # Default daily token quota
+        self.usage_data: Dict[str, Dict] = {}
+        self._ensure_quota_file_exists()
+
+    def _ensure_quota_file_exists(self):
+        """Ensure the quota file exists and is properly initialized."""
+        os.makedirs(os.path.dirname(self.quota_file_path), exist_ok=True)
+        if not os.path.exists(self.quota_file_path):
+            with open(self.quota_file_path, 'w') as f:
+                json.dump({}, f)
+
+    async def _load_usage_data(self):
+        """Load usage data from file."""
         try:
-            if os.path.exists(self.persist_file):
-                with open(self.persist_file, 'r') as f:
-                    data = json.load(f)
-                    for repo, usage in data.items():
-                        self.usage[repo] = QuotaUsage(
-                            tokens_used=usage['tokens_used'],
-                            requests_made=usage['requests_made'],
-                            last_reset=datetime.fromisoformat(usage['last_reset']),
-                            last_request=datetime.fromisoformat(usage['last_request'])
-                        )
-                logger.info(f"Loaded quota usage for {len(self.usage)} repositories")
+            async with aiofiles.open(self.quota_file_path, 'r') as f:
+                content = await f.read()
+                self.usage_data = json.loads(content) if content else {}
         except Exception as e:
-            logger.error(f"Error loading quota usage: {e}")
-    
-    async def _save_usage(self):
-        """Save quota usage to persistent storage."""
+            logger.error(f"Error loading quota data: {e}")
+            self.usage_data = {}
+
+    async def _save_usage_data(self):
+        """Save usage data to file."""
         try:
-            # Ensure directory exists
-            dir_name = os.path.dirname(self.persist_file)
-            if dir_name:
-                os.makedirs(dir_name, exist_ok=True)
-            
-            data = {
-                repo: {
-                    'tokens_used': usage.tokens_used,
-                    'requests_made': usage.requests_made,
-                    'last_reset': usage.last_reset.isoformat(),
-                    'last_request': usage.last_request.isoformat()
-                }
-                for repo, usage in self.usage.items()
-            }
-            
-            # Write to temporary file first
-            temp_file = f"{self.persist_file}.tmp"
-            with open(temp_file, 'w') as f:
-                json.dump(data, f, indent=2)
-            
-            # Atomic rename
-            os.replace(temp_file, self.persist_file)
-            logger.debug("Saved quota usage")
+            async with aiofiles.open(self.quota_file_path, 'w') as f:
+                await f.write(json.dumps(self.usage_data, indent=2))
         except Exception as e:
             logger.error(f"Error saving quota usage: {e}")
-    
-    async def _periodic_save(self):
-        """Periodically save quota usage."""
-        while True:
-            await asyncio.sleep(300)  # Save every 5 minutes
-            await self._save_usage()
-    
-    def _reset_if_needed(self, repo: str):
-        """Reset quota if daily limit has expired."""
-        if repo not in self.usage:
-            self.usage[repo] = QuotaUsage()
-            return
+
+    def _clean_old_data(self, repo_data: Dict):
+        """Remove usage data older than 24 hours."""
+        cutoff_time = (datetime.utcnow() - timedelta(days=1)).isoformat()
+        repo_data['usage_history'] = [
+            entry for entry in repo_data.get('usage_history', [])
+            if entry['timestamp'] > cutoff_time
+        ]
+
+    async def check_quota(self, repo_full_name: str) -> bool:
+        """Check if the repository has remaining quota."""
+        await self._load_usage_data()
         
-        usage = self.usage[repo]
-        now = datetime.utcnow()
-        
-        # Reset daily quota if 24 hours have passed
-        if now - usage.last_reset >= timedelta(days=1):
-            usage.tokens_used = 0
-            usage.last_reset = now
-            logger.info(f"Reset daily quota for {repo}")
-        
-        # Reset request count after 1 minute
-        if now - usage.last_request >= timedelta(minutes=1):
-            usage.requests_made = 0
-    
-    async def check_quota(self, repo: str) -> bool:
-        """Check if quota is available."""
-        async with self._lock:
-            self._reset_if_needed(repo)
-            usage = self.usage[repo]
-            
-            # Check daily token limit
-            if usage.tokens_used >= self.daily_token_limit:
-                logger.warning(f"Daily token limit exceeded for {repo}")
-                return False
-            
-            # Check rate limit
-            if usage.requests_made >= self.requests_per_minute:
-                logger.warning(f"Request rate limit exceeded for {repo}")
-                return False
-            
+        if repo_full_name not in self.usage_data:
             return True
-    
-    async def update_usage(self, repo: str, tokens_used: int):
-        """Update quota usage after a request."""
-        async with self._lock:
-            self._reset_if_needed(repo)
-            usage = self.usage[repo]
-            
-            usage.tokens_used += tokens_used
-            usage.requests_made += 1
-            usage.last_request = datetime.utcnow()
-            
-            logger.debug(
-                f"Updated quota for {repo}: "
-                f"{usage.tokens_used}/{self.daily_token_limit} tokens, "
-                f"{usage.requests_made}/{self.requests_per_minute} requests/min"
-            )
-    
-    async def get_usage_stats(self, repo: str) -> Dict:
-        """Get current usage statistics."""
-        async with self._lock:
-            self._reset_if_needed(repo)
-            usage = self.usage[repo]
-            
+
+        repo_data = self.usage_data[repo_full_name]
+        self._clean_old_data(repo_data)
+        
+        # Calculate total tokens used in the last 24 hours
+        total_tokens = sum(
+            entry['tokens'] for entry in repo_data.get('usage_history', [])
+        )
+        
+        return total_tokens < self.daily_quota
+
+    async def update_usage(self, repo_full_name: str, tokens_used: int):
+        """Update token usage for a repository."""
+        await self._load_usage_data()
+        
+        if repo_full_name not in self.usage_data:
+            self.usage_data[repo_full_name] = {'usage_history': []}
+        
+        repo_data = self.usage_data[repo_full_name]
+        self._clean_old_data(repo_data)
+        
+        # Add new usage entry
+        repo_data['usage_history'].append({
+            'timestamp': datetime.utcnow().isoformat(),
+            'tokens': tokens_used
+        })
+        
+        await self._save_usage_data()
+
+    async def get_usage_stats(self, repo_full_name: str) -> Dict:
+        """Get usage statistics for a repository."""
+        await self._load_usage_data()
+        
+        if repo_full_name not in self.usage_data:
             return {
-                'tokens_used_today': usage.tokens_used,
-                'tokens_remaining': self.daily_token_limit - usage.tokens_used,
-                'requests_this_minute': usage.requests_made,
-                'requests_remaining': self.requests_per_minute - usage.requests_made,
-                'last_reset': usage.last_reset.isoformat(),
-                'last_request': usage.last_request.isoformat()
+                'tokens_used_today': 0,
+                'quota_remaining': self.daily_quota,
+                'quota_reset_in': '24 hours'
             }
+        
+        repo_data = self.usage_data[repo_full_name]
+        self._clean_old_data(repo_data)
+        
+        tokens_used = sum(
+            entry['tokens'] for entry in repo_data.get('usage_history', [])
+        )
+        
+        # Find the oldest usage timestamp to calculate reset time
+        usage_history = repo_data.get('usage_history', [])
+        if usage_history:
+            oldest_timestamp = datetime.fromisoformat(usage_history[0]['timestamp'])
+            reset_time = oldest_timestamp + timedelta(days=1)
+            reset_in = reset_time - datetime.utcnow()
+            reset_hours = round(reset_in.total_seconds() / 3600, 1)
+            quota_reset_in = f"{reset_hours} hours"
+        else:
+            quota_reset_in = "24 hours"
+        
+        return {
+            'tokens_used_today': tokens_used,
+            'quota_remaining': max(0, self.daily_quota - tokens_used),
+            'quota_reset_in': quota_reset_in
+        }
 
 # Global instance
-quota_manager = GeminiQuotaManager(
-    persist_file=os.path.join(
-        os.getenv('QUOTA_PERSIST_DIR', 'data'),
-        'gemini_quota.json'
-    )
-) 
+quota_manager = GeminiQuotaManager() 

@@ -388,10 +388,7 @@ async def initialize_rag_system(
             retriever=retriever,
             memory=memory,
             return_source_documents=True,
-            verbose=False,
-            combine_docs_chain_kwargs={
-                "prompt": _create_custom_prompt()
-            }
+            verbose=False
         )
         
         logging.info("RAG system initialized successfully.")
@@ -466,6 +463,7 @@ async def query_rag_system(
     qa_chain_dict: dict,
     query: str,
     repo_full_name: Optional[str] = None,
+    chat_history: Optional[List[Dict[str, str]]] = None,
     github_client: Optional[Any] = None
 ) -> Union[str, Tuple[str, Dict]]:
     """Query the RAG system with quota management."""
@@ -501,8 +499,14 @@ async def query_rag_system(
         if token_counter:
             token_counter.total_tokens = 0
         
+        # Format chat history
+        formatted_history = []
+        if chat_history:
+            for message in chat_history:
+                formatted_history.append((message["role"], message["content"]))
+
         # Execute query
-        result = await qa_chain.ainvoke({"question": query})
+        result = await qa_chain.ainvoke({"question": query, "chat_history": formatted_history})
         
         answer = result.get("answer", "No answer generated.")
         source_docs = result.get("source_documents", [])

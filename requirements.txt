@@ -13,3 +13,4 @@ cryptography==42.0.8
 pyOpenSSL==24.0.0
 pytest==7.4.0
 pytest-asyncio==0.21.0 
+aiofiles>=23.2.1 

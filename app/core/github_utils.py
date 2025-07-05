@@ -491,9 +491,12 @@ async def fetch_all_repository_content(
         
         # Fetch issues
         if include_issues:
-            issues = repo.get_issues(state="all")[:max_items]
-            for issue in issues:
+            issues = repo.get_issues(state="all")
+            for i, issue in enumerate(issues):
+                if i >= max_items:
+                    break
                 if not issue.pull_request:  # Skip pull requests
+                    comments = issue.get_comments()
                     content["issues"].append({
                         "number": issue.number,
                         "title": issue.title,
@@ -506,14 +509,17 @@ async def fetch_all_repository_content(
                                 "body": comment.body,
                                 "created_at": comment.created_at.isoformat()
                             }
-                            for comment in issue.get_comments()[:max_items]
+                            for j, comment in enumerate(comments) if j < max_items
                         ]
                     })
         
         # Fetch pull requests
         if include_pulls:
-            pulls = repo.get_pulls(state="all")[:max_items]
-            for pull in pulls:
+            pulls = repo.get_pulls(state="all")
+            for i, pull in enumerate(pulls):
+                if i >= max_items:
+                    break
+                comments = pull.get_comments()
                 content["pulls"].append({
                     "number": pull.number,
                     "title": pull.title,
@@ -526,7 +532,7 @@ async def fetch_all_repository_content(
                             "body": comment.body,
                             "created_at": comment.created_at.isoformat()
                         }
-                        for comment in pull.get_comments()[:max_items]
+                        for j, comment in enumerate(comments) if j < max_items
                     ]
                 })
         
