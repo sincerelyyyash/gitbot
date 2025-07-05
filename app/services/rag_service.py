@@ -467,6 +467,7 @@ async def handle_issue_event(payload: IssuesPayload):
         logger.info(f"Ignoring issue action '{payload.action}' for issue #{issue_number}")
         return
     
+    # Initialize GitHub client first
     client = await get_github_app_installation_client(
         settings.github_app_id,
         settings.github_private_key,
@@ -476,75 +477,83 @@ async def handle_issue_event(payload: IssuesPayload):
         logger.error("Failed to initialize GitHub client")
         return
     
-    # Prepare current context documents
-    current_documents = []
-    if issue_body.strip():
-        current_documents.append({
-            "content": f"New Issue #{issue_number}: {issue_title}\n\n{issue_body}",
-            "metadata": {
-                "type": "new_issue", 
-                "issue_number": issue_number,
-                "repository": repo_full_name,
-                "timestamp": "current"
-            }
-        })
-    
-    # Get or initialize repository knowledge base
-    rag = await get_or_init_repo_knowledge_base(
-        repo_full_name,
-        installation_id,
-        include_current_content=True,
-        current_documents_data=current_documents,
-        github_client=client  # Pass the initialized client
-    )
-    
-    if not rag:
-        logger.error(f"Could not initialize RAG system for {repo_full_name}")
-        fallback_message = "Welcome! I'm currently setting up the knowledge base for this repository. Please try asking questions in a few minutes."
-        await post_issue_comment(client, repo_full_name, issue_number, fallback_message)
-        return
-    
-    # Create a contextual query for the new issue
-    contextual_query = f"""
-    New issue opened: "{issue_title}"
-    
-    Issue description: {issue_body}
-    
-    Based on the repository's codebase, documentation, and previous issues, please provide:
-    1. Initial analysis or suggestions for this issue
-    2. Relevant code sections or documentation that might be related
-    3. Similar past issues if any exist
-    4. Potential solutions or next steps to investigate
-    
-    If this appears to be a bug report, question, or feature request, tailor your response accordingly.
-    """
-    
-    # Query the RAG system
     try:
-        answer = await query_rag_system(rag, contextual_query)
+        # Prepare current context documents
+        current_documents = []
+        if issue_body.strip():
+            current_documents.append({
+                "content": f"New Issue #{issue_number}: {issue_title}\n\n{issue_body}",
+                "metadata": {
+                    "type": "new_issue", 
+                    "issue_number": issue_number,
+                    "repository": repo_full_name,
+                    "timestamp": "current"
+                }
+            })
         
-        # Add a note about the knowledge base
-        collection_info = await get_collection_info(rag)
-        if collection_info and "document_count" in collection_info:
-            answer += f"\n\n---\n*Analysis based on {collection_info['document_count']} repository documents*"
+        # Get or initialize repository knowledge base
+        rag = await get_or_init_repo_knowledge_base(
+            repo_full_name,
+            installation_id,
+            include_current_content=True,
+            current_documents_data=current_documents
+        )
         
+        if not rag:
+            logger.error(f"Could not initialize RAG system for {repo_full_name}")
+            fallback_message = "Welcome! I'm currently setting up the knowledge base for this repository. Please try asking questions in a few minutes."
+            await post_issue_comment(client, repo_full_name, issue_number, fallback_message)
+            return
+        
+        # Create a contextual query for the new issue
+        contextual_query = f"""
+        New issue opened: "{issue_title}"
+        
+        Issue description: {issue_body}
+        
+        Based on the repository's codebase, documentation, and previous issues, please provide:
+        1. Initial analysis or suggestions for this issue
+        2. Relevant code sections or documentation that might be related
+        3. Similar past issues if any exist
+        4. Potential solutions or next steps to investigate
+        
+        If this appears to be a bug report, question, or feature request, tailor your response accordingly.
+        """
+        
+        try:
+            # Query the RAG system
+            answer, usage_stats = await query_rag_system(rag, contextual_query, repo_full_name)
+            
+            # Add collection info to response
+            collection_info = await get_collection_info(rag)
+            if collection_info and "document_count" in collection_info:
+                answer += f"\n\n---\n*Analysis based on {collection_info['document_count']} repository documents*"
+            
+            # Add quota usage information
+            tokens_remaining = usage_stats['tokens_remaining']
+            answer += f"\n*API Usage: {tokens_remaining:,} tokens remaining today.*"
+            
+            # Post the response
+            await post_issue_comment(client, repo_full_name, issue_number, answer)
+            
+        except Exception as e:
+            logger.exception(f"Error querying RAG system for {repo_full_name}")
+            error_message = (
+                "I encountered an error while analyzing this issue. "
+                "Please try again later or contact the repository administrators."
+            )
+            await post_issue_comment(client, repo_full_name, issue_number, error_message)
+            
     except Exception as e:
-        logger.exception(f"Error querying RAG system for {repo_full_name}")
-        answer = "Thank you for opening this issue! I'm currently processing the repository content and will be able to provide more helpful responses soon."
-    
-    # Get GitHub client for posting response
-    client = await get_github_app_installation_client(
-        settings.github_app_id, 
-        settings.github_private_key, 
-        installation_id
-    )
-    if not client:
-        logger.error("Could not authenticate GitHub client for posting comment.")
-        return
-    
-    # Post the response
-    await post_issue_comment(client, repo_full_name, issue_number, answer)
-    logger.info(f"Posted RAG-generated response to new issue {repo_full_name} #{issue_number}")
+        logger.exception(f"Error handling issue event for {repo_full_name}")
+        try:
+            error_message = (
+                "I encountered an unexpected error while processing this issue. "
+                "Please try again later or contact the repository administrators."
+            )
+            await post_issue_comment(client, repo_full_name, issue_number, error_message)
+        except:
+            logger.exception("Failed to post error message")
 
 async def refresh_repository_knowledge_base(repo_full_name: str, installation_id: int):
     """
