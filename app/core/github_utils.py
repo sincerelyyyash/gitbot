@@ -173,13 +173,26 @@ async def fetch_repository_files(
                     ):
                         continue
                     
-                    contents.append({
-                        "path": item.path,
-                        "content": item.decoded_content.decode(),
-                        "sha": item.sha,
-                        "size": item.size,
-                        "type": "file"
-                    })
+                    try:
+                        content = item.decoded_content
+                        if _is_text_file(content):
+                            # Try UTF-8 first
+                            try:
+                                decoded_content = content.decode('utf-8')
+                            except UnicodeDecodeError:
+                                # Fallback to latin-1 which can decode any byte sequence
+                                decoded_content = content.decode('latin-1')
+                            
+                            contents.append({
+                                "path": item.path,
+                                "content": decoded_content,
+                                "sha": item.sha,
+                                "size": item.size,
+                                "type": "file"
+                            })
+                    except Exception as e:
+                        logger.warning(f"Skipping file {item.path} due to decoding error: {e}")
+                        continue
         
         await process_contents(path)
         return contents

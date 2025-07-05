@@ -2,10 +2,11 @@ fastapi==0.111.0
 uvicorn==0.30.1
 python-dotenv==1.0.0
 PyGithub==2.2.0
-langchain
-langchain-google-genai
-langchain-community
-pydantic-settings
+langchain==0.1.12
+langchain-google-genai==0.0.11
+langchain-community==0.0.28
+langchain-chroma==0.0.15
+pydantic-settings==2.2.1
 chromadb==0.5.3
 PyJWT==2.8.0
 cryptography==42.0.8

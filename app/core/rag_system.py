@@ -1,7 +1,7 @@
 import logging
 from typing import List, Dict, Any, Optional, Union, Tuple
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains import ConversationalRetrievalChain
 from langchain.memory import ConversationBufferMemory
@@ -217,10 +217,16 @@ async def initialize_rag_system(
             def __init__(self, embeddings):
                 self.embeddings = embeddings
             
-            def __call__(self, input: Union[str, List[str]]) -> List[List[float]]:
-                if isinstance(input, str):
-                    input = [input]
-                return self.embeddings.embed_documents(input)
+            def __call__(self, input_texts: Union[str, List[str]]) -> List[List[float]]:
+                if isinstance(input_texts, str):
+                    input_texts = [input_texts]
+                return self.embeddings.embed_documents(input_texts)
+
+            def embed_documents(self, texts: List[str]) -> List[List[float]]:
+                return self.__call__(texts)
+
+            def embed_query(self, text: str) -> List[float]:
+                return self.embeddings.embed_query(text)
         
         chroma_embeddings = ChromaEmbeddingFunction(embeddings)
         
