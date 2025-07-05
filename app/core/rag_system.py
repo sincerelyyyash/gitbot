@@ -6,6 +6,8 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains import ConversationalRetrievalChain
 from langchain.memory import ConversationBufferMemory
 from langchain_core.documents import Document
+from langchain.callbacks.base import BaseCallbackHandler
+from langchain.schema import LLMResult
 from app.config import settings
 import os
 import chromadb
@@ -16,6 +18,94 @@ import logging
 import asyncio
 from app.core.quota_manager import quota_manager
 from chromadb.db.base import UniqueConstraintError
+from google.api_core.exceptions import PermissionDenied, ResourceExhausted, InvalidArgument
+from langchain_google_genai._common import GoogleGenerativeAIError
+
+# Error types for better error handling
+class RAGError(Exception):
+    """Base class for RAG system errors."""
+    pass
+
+class APIKeyRestrictedError(RAGError):
+    """Raised when API key has IP address restrictions."""
+    pass
+
+class QuotaExceededError(RAGError):
+    """Raised when API quota is exceeded."""
+    pass
+
+class InvalidAPIKeyError(RAGError):
+    """Raised when API key is invalid or unauthorized."""
+    pass
+
+class NetworkError(RAGError):
+    """Raised when there are network connectivity issues."""
+    pass
+
+def _categorize_google_api_error(error: Exception) -> RAGError:
+    """Categorize Google API errors into specific error types."""
+    error_str = str(error).lower()
+    
+    if "ip address restriction" in error_str or "api_key_ip_address_blocked" in error_str:
+        return APIKeyRestrictedError(
+            "Your Google API key has IP address restrictions. "
+            "Please either remove the IP restrictions in Google Cloud Console "
+            "or add your current IP address to the allowed list."
+        )
+    elif "quota exceeded" in error_str or "resource_exhausted" in error_str:
+        return QuotaExceededError(
+            "Google API quota exceeded. Please wait before trying again "
+            "or check your quota limits in Google Cloud Console."
+        )
+    elif "invalid" in error_str and "api" in error_str:
+        return InvalidAPIKeyError(
+            "Invalid Google API key. Please check your GEMINI_API_KEY "
+            "in the environment configuration."
+        )
+    elif "network" in error_str or "connection" in error_str or "timeout" in error_str:
+        return NetworkError(
+            "Network connectivity issue. Please check your internet connection "
+            "and try again."
+        )
+    else:
+        return RAGError(f"Google API error: {str(error)}")
+
+def _get_error_suggestions(error: RAGError) -> List[str]:
+    """Get actionable suggestions based on error type."""
+    if isinstance(error, APIKeyRestrictedError):
+        return [
+            "Remove IP address restrictions from your Google Cloud Console API key",
+            "Add your current IP address to the allowed list in Google Cloud Console",
+            "Consider using a different API key without IP restrictions",
+            "If using a VPN or proxy, try disabling it temporarily"
+        ]
+    elif isinstance(error, QuotaExceededError):
+        return [
+            "Wait for quota to reset (usually daily)",
+            "Check your quota usage in Google Cloud Console",
+            "Consider upgrading your API plan",
+            "Implement request throttling in your application"
+        ]
+    elif isinstance(error, InvalidAPIKeyError):
+        return [
+            "Verify your GEMINI_API_KEY in environment configuration",
+            "Ensure the API key is active in Google Cloud Console",
+            "Check if the API key has the necessary permissions",
+            "Generate a new API key if the current one is corrupted"
+        ]
+    elif isinstance(error, NetworkError):
+        return [
+            "Check your internet connection",
+            "Try again in a few minutes",
+            "Verify firewall settings aren't blocking the request",
+            "Consider using a different network if available"
+        ]
+    else:
+        return [
+            "Check the application logs for more details",
+            "Verify all configuration parameters are correct",
+            "Try restarting the application"
+        ]
 
 def _mask_api_key(api_key: str) -> str:
     if not api_key or len(api_key) < 8:
@@ -139,18 +229,20 @@ def _get_or_create_collection(
             raise
     return collection
 
-class TokenCounterCallbackHandler:
+class TokenCounterCallbackHandler(BaseCallbackHandler):
     """Callback handler to count tokens used in LLM calls."""
     def __init__(self):
+        super().__init__()
         self.total_tokens = 0
     
-    def on_llm_start(self, *args, **kwargs):
+    def on_llm_start(self, serialized, prompts, **kwargs):
         pass
     
-    def on_llm_end(self, response, *args, **kwargs):
+    def on_llm_end(self, response: LLMResult, **kwargs):
         # Gemini doesn't provide token counts directly, estimate based on text length
         # Rough estimate: 4 chars = 1 token for English text
-        self.total_tokens += len(response.generations[0][0].text) // 4
+        if response.generations and response.generations[0] and response.generations[0][0]:
+            self.total_tokens += len(response.generations[0][0].text) // 4
 
 async def initialize_rag_system(
     documents_data: List[Dict[str, Any]],
@@ -266,10 +358,10 @@ async def initialize_rag_system(
         
         # Create retriever with improved configuration
         retriever = vectorstore.as_retriever(
-            search_type="similarity",
+            search_type="mmr",  # Use MMR search for better diversity in results
             search_kwargs={
-                "k": 6,  # Return top 6 most relevant chunks
-                "fetch_k": 20,  # Fetch top 20 then filter to 6
+                "k": min(6, collection.count()),  # Dynamically adjust k based on collection size
+                "lambda_mult": 0.7  # Balance between relevance (1.0) and diversity (0.0)
             }
         )
         
@@ -320,9 +412,26 @@ async def initialize_rag_system(
             "token_counter": TokenCounterCallbackHandler()  # Include token counter in return
         }
         
+    except (GoogleGenerativeAIError, PermissionDenied, ResourceExhausted, InvalidArgument) as e:
+        # Handle Google API specific errors
+        categorized_error = _categorize_google_api_error(e)
+        logging.error(f"Google API error during RAG initialization: {categorized_error}")
+        
+        return {
+            "error": str(categorized_error),
+            "error_type": type(categorized_error).__name__,
+            "fallback_available": True,
+            "suggestions": _get_error_suggestions(categorized_error)
+        }
+        
     except Exception as e:
         logging.exception("Failed to initialize RAG system.")
-        return {"error": f"Failed to initialize RAG system: {str(e)}"}
+        return {
+            "error": f"Failed to initialize RAG system: {str(e)}",
+            "error_type": "UnknownError",
+            "fallback_available": False,
+            "suggestions": ["Check logs for more details", "Verify all configuration parameters"]
+        }
 
 def _create_custom_prompt():
     """Create a custom prompt template for better responses."""
@@ -356,21 +465,34 @@ Answer:"""
 async def query_rag_system(
     qa_chain_dict: dict,
     query: str,
-    repo_full_name: Optional[str] = None
+    repo_full_name: Optional[str] = None,
+    github_client: Optional[Any] = None
 ) -> Union[str, Tuple[str, Dict]]:
     """Query the RAG system with quota management."""
     if not qa_chain_dict or "qa_chain" not in qa_chain_dict:
         logging.error("qa_chain_dict missing 'qa_chain'.")
-        return "RAG system not initialized."
+        error_msg = "RAG system not initialized."
+        if repo_full_name:
+            # Return dummy usage stats for consistency
+            return error_msg, {"tokens_remaining": 0, "tokens_used": 0}
+        return error_msg
+        
     if not query or not isinstance(query, str):
         logging.error("Query must be a non-empty string.")
-        return "Query must be a non-empty string."
+        error_msg = "Query must be a non-empty string."
+        if repo_full_name:
+            # Return dummy usage stats for consistency
+            return error_msg, {"tokens_remaining": 0, "tokens_used": 0}
+        return error_msg
     
     try:
         # Check quota before proceeding
         if repo_full_name:
             if not await quota_manager.check_quota(repo_full_name):
-                return "API quota exceeded. Please try again later."
+                error_msg = "API quota exceeded. Please try again later."
+                # Return current usage stats even when quota exceeded
+                usage_stats = await quota_manager.get_usage_stats(repo_full_name)
+                return error_msg, usage_stats
         
         qa_chain = qa_chain_dict["qa_chain"]
         token_counter = qa_chain_dict.get("token_counter")
@@ -398,7 +520,15 @@ async def query_rag_system(
         
     except Exception as e:
         logging.exception("Failed to query RAG system.")
-        return f"I encountered an error while processing your question: {str(e)}"
+        error_msg = "I encountered an unexpected error while processing your request. The issue has been logged."
+        if repo_full_name:
+            # Return current usage stats even on error
+            try:
+                usage_stats = await quota_manager.get_usage_stats(repo_full_name)
+            except:
+                usage_stats = {"tokens_remaining": 0, "tokens_used": 0}
+            return error_msg, usage_stats
+        return error_msg
 
 async def get_collection_info(qa_chain_dict: dict) -> Dict[str, Any]:
     """

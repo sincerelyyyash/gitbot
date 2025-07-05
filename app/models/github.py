@@ -93,4 +93,24 @@ class IssuesPayload(BaseModel):
     sender: Optional[User] = None
     # Allow additional fields
     class Config:
+        extra = "allow"
+
+class InstallationPayload(BaseModel):
+    action: str  # "created", "deleted", etc.
+    installation: Installation
+    repositories: Optional[List[Repository]] = None
+    sender: User
+    # Allow additional fields
+    class Config:
+        extra = "allow"
+
+class InstallationRepositoriesPayload(BaseModel):
+    action: str  # "added", "removed"
+    installation: Installation
+    repositories_added: Optional[List[Repository]] = None
+    repositories_removed: Optional[List[Repository]] = None
+    repository_selection: str
+    sender: User
+    # Allow additional fields
+    class Config:
         extra = "allow" 

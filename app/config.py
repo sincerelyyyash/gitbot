@@ -41,6 +41,11 @@ class Settings(BaseSettings):
         description="GitHub webhook secret for verifying webhook payloads",
         env="GITHUB_WEBHOOK_SECRET"
     )
+    github_app_name: str = Field(
+        default="synapticbot",
+        description="The name of the GitHub App",
+        env="GITHUB_APP_NAME"
+    )
     
     # Gemini API settings
     gemini_api_key: str = Field(
@@ -67,6 +72,13 @@ class Settings(BaseSettings):
     log_level: str = Field(
         default="INFO",
         description="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)"
+    )
+    
+    # Admin settings
+    admin_token: Optional[str] = Field(
+        default=None,
+        description="Admin token for accessing management endpoints",
+        env="ADMIN_TOKEN"
     )
     
     # CORS settings

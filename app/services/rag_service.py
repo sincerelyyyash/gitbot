@@ -32,9 +32,81 @@ repo_last_activity: Dict[str, datetime] = {}
 # Track scheduled tasks
 scheduled_tasks = set()
 
+# Track recent error responses to prevent duplicate fallback messages
+recent_error_responses: Dict[str, datetime] = {}
+
+# Circuit breaker: track error counts per repository
+repo_error_counts: Dict[str, int] = {}
+repo_circuit_breaker: Dict[str, datetime] = {}
+
+def is_issue_a_question(title: str) -> bool:
+    """Determine if an issue title is likely a question."""
+    title_lower = title.lower().strip()
+    # Keywords that often start a question
+    question_starters = [
+        "how", "what", "when", "where", "who", "why", "which",
+        "can", "could", "do", "does", "is", "are", "will", "would"
+    ]
+    # Check if the title starts with a question word or ends with a question mark
+    return any(title_lower.startswith(word) for word in question_starters) or title_lower.endswith("?")
+
 def update_repo_activity(repo_full_name: str):
     """Update last activity timestamp for a repository."""
     repo_last_activity[repo_full_name] = datetime.utcnow()
+
+def should_send_error_response(repo_full_name: str, issue_number: int, error_type: str) -> bool:
+    """Check if we should send an error response or if we've already sent one recently."""
+    key = f"{repo_full_name}:{issue_number}:{error_type}"
+    now = datetime.utcnow()
+    
+    # Check if we've sent this error type for this issue recently (within last 5 minutes)
+    if key in recent_error_responses:
+        last_response = recent_error_responses[key]
+        if now - last_response < timedelta(minutes=5):
+            logger.info(f"Skipping duplicate error response for {key}")
+            return False
+    
+    # Record this error response
+    recent_error_responses[key] = now
+    
+    # Clean up old entries (older than 1 hour)
+    cutoff_time = now - timedelta(hours=1)
+    keys_to_remove = [k for k, v in recent_error_responses.items() if v < cutoff_time]
+    for k in keys_to_remove:
+        del recent_error_responses[k]
+    
+    return True
+
+def is_circuit_breaker_open(repo_full_name: str) -> bool:
+    """Check if circuit breaker is open (too many recent errors)."""
+    now = datetime.utcnow()
+    
+    # Check if circuit breaker is currently open
+    if repo_full_name in repo_circuit_breaker:
+        breaker_time = repo_circuit_breaker[repo_full_name]
+        # Circuit breaker is open for 10 minutes after 5 consecutive errors
+        if now - breaker_time < timedelta(minutes=10):
+            return True
+        else:
+            # Reset circuit breaker after timeout
+            del repo_circuit_breaker[repo_full_name]
+            repo_error_counts[repo_full_name] = 0
+    
+    return False
+
+def increment_error_count(repo_full_name: str):
+    """Increment error count and potentially open circuit breaker."""
+    repo_error_counts[repo_full_name] = repo_error_counts.get(repo_full_name, 0) + 1
+    
+    # Open circuit breaker after 5 consecutive errors
+    if repo_error_counts[repo_full_name] >= 5:
+        repo_circuit_breaker[repo_full_name] = datetime.utcnow()
+        logger.warning(f"Circuit breaker opened for {repo_full_name} due to repeated errors")
+
+def reset_error_count(repo_full_name: str):
+    """Reset error count on successful operation."""
+    if repo_full_name in repo_error_counts:
+        repo_error_counts[repo_full_name] = 0
 
 async def get_or_init_repo_knowledge_base(
     repo_full_name: str, 
@@ -207,8 +279,24 @@ async def get_or_init_repo_knowledge_base(
         )
         
         if "error" in rag_result:
-            logger.error(f"RAG initialization error for {repo_full_name}: {rag_result['error']}")
-            return None
+            error_type = rag_result.get("error_type", "UnknownError")
+            error_message = rag_result["error"]
+            suggestions = rag_result.get("suggestions", [])
+            
+            logger.error(f"RAG initialization error for {repo_full_name}: {error_message}")
+            
+            # Log suggestions for troubleshooting
+            if suggestions:
+                logger.info(f"Suggestions for {repo_full_name}: {'; '.join(suggestions)}")
+            
+            # Return error information for better handling
+            return {
+                "error": True,
+                "error_type": error_type,
+                "error_message": error_message,
+                "suggestions": suggestions,
+                "fallback_available": rag_result.get("fallback_available", False)
+            }
         
         # Store in memory for quick access
         repo_knowledge_base[repo_full_name] = rag_result
@@ -367,6 +455,11 @@ async def handle_issue_comment_event(payload: IssueCommentPayload):
     logger.info(f"Handling issue comment event for {repo_full_name} issue #{issue_number}")
     update_repo_activity(repo_full_name)
     
+    # Check circuit breaker
+    if is_circuit_breaker_open(repo_full_name):
+        logger.info(f"Circuit breaker is open for {repo_full_name}, skipping response")
+        return
+    
     # Check quota before proceeding
     if not await quota_manager.check_quota(repo_full_name):
         client = await get_github_app_installation_client(
@@ -416,148 +509,250 @@ async def handle_issue_comment_event(payload: IssueCommentPayload):
         current_documents_data=current_documents
     )
     
-    if not rag:
-        logger.error(f"Could not initialize RAG system for {repo_full_name}")
-        return
-    
-    try:
-        # Query RAG system
-        answer, usage_stats = await query_rag_system(rag, comment, repo_full_name)
-        
-        # Post response
+    # Handle RAG initialization errors with fallback responses
+    if not rag or (isinstance(rag, dict) and rag.get("error")):
         client = await get_github_app_installation_client(
             settings.github_app_id,
             settings.github_private_key,
             installation_id
         )
         if client:
-            # Add quota usage information to response
-            tokens_remaining = usage_stats['tokens_remaining']
-            usage_info = f"\n\n---\n*API Usage: {tokens_remaining:,} tokens remaining today.*"
-            await post_issue_comment(client, repo_full_name, issue_number, answer + usage_info)
+            if isinstance(rag, dict) and rag.get("error"):
+                error_type = rag.get("error_type", "UnknownError")
+                error_message = rag.get("error_message", "Unknown error occurred")
+                suggestions = rag.get("suggestions", [])
+                
+                # Check if we should send error response (prevent duplicates)
+                if not should_send_error_response(repo_full_name, issue_number, error_type):
+                    return
+                
+                if error_type == "APIKeyRestrictedError":
+                    fallback_message = (
+                        "⚠️ **Configuration Issue**\n\n"
+                        "I'm currently unable to process your question due to API key restrictions. "
+                        "The repository administrator needs to:\n"
+                        "• Remove IP address restrictions from the Google API key, or\n"
+                        "• Add the current server IP to the allowed list\n\n"
+                        "Please contact the repository administrator to resolve this issue."
+                    )
+                elif error_type == "QuotaExceededError":
+                    fallback_message = (
+                        "⚠️ **Quota Exceeded**\n\n"
+                        "I've reached the daily API quota limit. Please try again tomorrow "
+                        "or contact the repository administrator to increase the quota."
+                    )
+                elif error_type == "InvalidAPIKeyError":
+                    fallback_message = (
+                        "⚠️ **Configuration Issue**\n\n"
+                        "There's an issue with the API key configuration. "
+                        "Please contact the repository administrator to resolve this."
+                    )
+                else:
+                    fallback_message = (
+                        "⚠️ **Service Temporarily Unavailable**\n\n"
+                        "I'm currently unable to process your question due to a technical issue. "
+                        "Please try again later or contact the repository administrator if the problem persists."
+                    )
+            else:
+                # Check if we should send error response (prevent duplicates)
+                if not should_send_error_response(repo_full_name, issue_number, "InitializationError"):
+                    return
+                    
+                fallback_message = (
+                    "I'm currently setting up the knowledge base for this repository. "
+                    "Please try asking your question again in a few minutes."
+                )
+            
+            await post_issue_comment(client, repo_full_name, issue_number, fallback_message)
+        
+        # Increment error count for circuit breaker
+        increment_error_count(repo_full_name)
+        return
+    
+    try:
+        # Initialize GitHub client first
+        client = await get_github_app_installation_client(
+            settings.github_app_id,
+            settings.github_private_key,
+            installation_id
+        )
+        if not client:
+            logger.error("Failed to initialize GitHub client")
+            return
+            
+        # Query RAG system with client for rate limiting
+        result = await query_rag_system(rag, comment, repo_full_name, github_client=client)
+        
+        # Handle both tuple and string returns
+        if isinstance(result, tuple):
+            answer, _ = result  # Ignore usage stats
+        else:
+            # If we got a string, it's an error message
+            answer = result
+        
+        # Post response
+        await post_issue_comment(client, repo_full_name, issue_number, answer)
+        
+        # Reset error count on successful operation
+        reset_error_count(repo_full_name)
     
     except Exception as e:
         logger.exception(f"Error processing comment for {repo_full_name}")
-        # Post error message
-        client = await get_github_app_installation_client(
-            settings.github_app_id,
-            settings.github_private_key,
-            installation_id
-        )
-        if client:
-            error_message = (
-                "I encountered an error while processing your question. "
-                "Please try again later or contact the repository administrators."
+        
+        # Only send error message if we haven't sent one recently
+        if should_send_error_response(repo_full_name, issue_number, "ProcessingError"):
+            client = await get_github_app_installation_client(
+                settings.github_app_id,
+                settings.github_private_key,
+                installation_id
             )
-            await post_issue_comment(client, repo_full_name, issue_number, error_message)
+            if client:
+                error_message = (
+                    "I encountered an error while processing your question. "
+                    "Please try again later or contact the repository administrators."
+                )
+                await post_issue_comment(client, repo_full_name, issue_number, error_message)
+                
+        # Increment error count for circuit breaker
+        increment_error_count(repo_full_name)
 
 async def handle_issue_event(payload: IssuesPayload):
-    """Handle new issue events with comprehensive repository context."""
+    """
+    Handle 'issues' webhook events.
+    - When an issue is opened, analyze it and provide a summary or suggestions.
+    - If the issue is identified as a question, provide a direct answer.
+    - When an issue is edited, re-evaluate if needed.
+    """
+    action = payload.action
+    issue = payload.issue
     repo_full_name = payload.repository.full_name
-    issue_number = payload.issue.number
     installation_id = payload.installation.id
-    issue_body = payload.issue.body or ""
-    issue_title = getattr(payload.issue, 'title', '') or f"Issue #{issue_number}"
-    
-    logger.info(f"Handling issue event for {repo_full_name} issue #{issue_number} (action: {payload.action})")
+
+    logger.info(f"Handling issue event: {action} for issue #{issue.number} in {repo_full_name}")
+
+    if action not in ["opened", "edited"]:
+        logger.info(f"Ignoring issue event action: {action}")
+        return
+
+    if is_circuit_breaker_open(repo_full_name):
+        logger.warning(f"Circuit breaker is open for {repo_full_name}, skipping issue event.")
+        return
+
     update_repo_activity(repo_full_name)
-    
-    # Only respond to newly opened issues
-    if payload.action != "opened":
-        logger.info(f"Ignoring issue action '{payload.action}' for issue #{issue_number}")
+
+    # Check for rate limiting
+    if not quota_manager.check_quota(repo_full_name):
+        logger.warning(f"Rate limit exceeded for {repo_full_name}. Skipping issue event.")
+        if should_send_error_response(repo_full_name, issue.number, "rate_limit"):
+            await post_issue_comment(
+                settings.github_app_id,
+                settings.github_private_key,
+                installation_id,
+                repo_full_name,
+                issue.number,
+                "I've reached my processing limit for now. Please try again later."
+            )
         return
-    
-    # Initialize GitHub client first
-    client = await get_github_app_installation_client(
-        settings.github_app_id,
-        settings.github_private_key,
-        installation_id
+
+    # Prepare current issue content
+    current_documents = [{
+        "content": f"Current Issue #{issue.number}: {issue.title}\n\n{issue.body}",
+        "metadata": {
+            "type": "current_issue",
+            "issue_number": issue.number,
+            "repository": repo_full_name
+        }
+    }]
+
+    # Get or initialize the knowledge base
+    rag_system = await get_or_init_repo_knowledge_base(
+        repo_full_name=repo_full_name,
+        installation_id=installation_id,
+        current_documents_data=current_documents
     )
-    if not client:
-        logger.error("Failed to initialize GitHub client")
+
+    if not rag_system:
+        logger.error(f"Failed to initialize RAG system for {repo_full_name}")
+        increment_error_count(repo_full_name)
         return
-    
+
+    # Define the question for the RAG system
+    if is_issue_a_question(issue.title):
+        # This is a direct question from a user.
+        question = f"""
+        A user has asked a question in a GitHub issue. Please provide a clear and direct answer based on the repository's knowledge base.
+
+        The user's question is:
+        Title: "{issue.title}"
+        Body: "{issue.body}"
+
+        Please answer the question directly. Do not analyze the issue, just provide the answer.
+        For example, if the user asks "How do I run the project?", provide the steps to run the project.
+        """
+        response_footer = f"*Answer based on an analysis of {rag_system.get('collection_count', 'several')} repository documents.*"
+        logger.info(f"Identified issue #{issue.number} as a question. Preparing a direct answer.")
+    else:
+        # This is likely a bug report, feature request, or other type of issue.
+        question = f"""
+        Analyze the following GitHub issue and provide a comprehensive analysis.
+        The issue is from repository {repo_full_name}, issue number #{issue.number}.
+        Title: "{issue.title}"
+        Body: "{issue.body}"
+
+        Your analysis should include:
+        1. A brief summary of what the issue is about (e.g., bug report, feature request).
+        2. An initial analysis or suggestions for how to approach this issue.
+        3. Identification of relevant code sections or documentation from the knowledge base.
+        4. A check for similar past issues in the knowledge base.
+        5. Suggested potential solutions or next steps.
+        """
+        response_footer = f"*Analysis based on an analysis of {rag_system.get('collection_count', 'several')} repository documents.*"
+        logger.info(f"Identified issue #{issue.number} as a standard issue. Preparing a detailed analysis.")
+
+    logger.info(f"Querying RAG system for issue #{issue.number} in {repo_full_name}")
+
+    # Query the RAG system
     try:
-        # Prepare current context documents
-        current_documents = []
-        if issue_body.strip():
-            current_documents.append({
-                "content": f"New Issue #{issue_number}: {issue_title}\n\n{issue_body}",
-                "metadata": {
-                    "type": "new_issue", 
-                    "issue_number": issue_number,
-                    "repository": repo_full_name,
-                    "timestamp": "current"
-                }
-            })
-        
-        # Get or initialize repository knowledge base
-        rag = await get_or_init_repo_knowledge_base(
-            repo_full_name,
+        result = await query_rag_system(
+            qa_chain=rag_system["qa_chain"],
+            query=question,
+            chat_history=[]
+        )
+        answer = result.get("answer", "No answer found.")
+
+        # Post the analysis as a comment
+        await post_issue_comment(
+            settings.github_app_id,
+            settings.github_private_key,
             installation_id,
-            include_current_content=True,
-            current_documents_data=current_documents
+            repo_full_name,
+            issue.number,
+            f"{answer}\n\n{response_footer}"
         )
         
-        if not rag:
-            logger.error(f"Could not initialize RAG system for {repo_full_name}")
-            fallback_message = "Welcome! I'm currently setting up the knowledge base for this repository. Please try asking questions in a few minutes."
-            await post_issue_comment(client, repo_full_name, issue_number, fallback_message)
-            return
-        
-        # Create a contextual query for the new issue
-        contextual_query = f"""
-        New issue opened: "{issue_title}"
-        
-        Issue description: {issue_body}
-        
-        Based on the repository's codebase, documentation, and previous issues, please provide:
-        1. Initial analysis or suggestions for this issue
-        2. Relevant code sections or documentation that might be related
-        3. Similar past issues if any exist
-        4. Potential solutions or next steps to investigate
-        
-        If this appears to be a bug report, question, or feature request, tailor your response accordingly.
-        """
-        
-        try:
-            # Query the RAG system
-            answer, usage_stats = await query_rag_system(rag, contextual_query, repo_full_name)
-            
-            # Add collection info to response
-            collection_info = await get_collection_info(rag)
-            if collection_info and "document_count" in collection_info:
-                answer += f"\n\n---\n*Analysis based on {collection_info['document_count']} repository documents*"
-            
-            # Add quota usage information
-            tokens_remaining = usage_stats['tokens_remaining']
-            answer += f"\n*API Usage: {tokens_remaining:,} tokens remaining today.*"
-            
-            # Post the response
-            await post_issue_comment(client, repo_full_name, issue_number, answer)
-            
-        except Exception as e:
-            logger.exception(f"Error querying RAG system for {repo_full_name}")
-            error_message = (
-                "I encountered an error while analyzing this issue. "
-                "Please try again later or contact the repository administrators."
-            )
-            await post_issue_comment(client, repo_full_name, issue_number, error_message)
-            
+        # Consume quota on success
+        quota_manager.consume_quota(repo_full_name)
+        reset_error_count(repo_full_name)
+
+        logger.info(f"Posted analysis for issue #{issue.number} in {repo_full_name}")
+
     except Exception as e:
-        logger.exception(f"Error handling issue event for {repo_full_name}")
-        try:
-            error_message = (
-                "I encountered an unexpected error while processing this issue. "
-                "Please try again later or contact the repository administrators."
+        logger.exception(f"Error querying RAG system for issue #{issue.number}: {e}")
+        increment_error_count(repo_full_name)
+        if should_send_error_response(repo_full_name, issue.number, "rag_error"):
+            await post_issue_comment(
+                settings.github_app_id,
+                settings.github_private_key,
+                installation_id,
+                repo_full_name,
+                issue.number,
+                "I encountered an error while analyzing this issue. I will try again later."
             )
-            await post_issue_comment(client, repo_full_name, issue_number, error_message)
-        except:
-            logger.exception("Failed to post error message")
+
 
 async def refresh_repository_knowledge_base(repo_full_name: str, installation_id: int):
     """
-    Refresh the knowledge base for a repository by forcing a complete reindex.
+    Trigger a full refresh of the repository's knowledge base.
     """
     logger.info(f"Refreshing knowledge base for {repo_full_name}")
     

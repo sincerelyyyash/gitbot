@@ -54,7 +54,9 @@ class GeminiQuotaManager:
         """Save quota usage to persistent storage."""
         try:
             # Ensure directory exists
-            os.makedirs(os.path.dirname(self.persist_file), exist_ok=True)
+            dir_name = os.path.dirname(self.persist_file)
+            if dir_name:
+                os.makedirs(dir_name, exist_ok=True)
             
             data = {
                 repo: {
