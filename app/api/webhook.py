@@ -1,11 +1,25 @@
 from fastapi import APIRouter, Request, HTTPException, status, Depends
 from fastapi.responses import PlainTextResponse, JSONResponse
 from app.config import settings
-from app.models.github import IssueCommentPayload, IssuesPayload, PushPayload, InstallationPayload, InstallationRepositoriesPayload
+from app.models.github import (
+    IssueCommentPayload, 
+    IssuesPayload, 
+    PushPayload, 
+    InstallationPayload, 
+    InstallationRepositoriesPayload,
+    PullRequestPayload,
+    PullRequestReviewPayload,
+    PullRequestReviewCommentPayload
+)
 from app.services.rag_service import (
     handle_issue_comment_event, 
     handle_issue_event,
+    handle_issue_event_enhanced,
     handle_push_event,
+    handle_pr_opened_event,
+    handle_pr_updated_event,
+    handle_pr_closed_event,
+    handle_pr_review_submitted_event,
     get_repository_collection_info,
     delete_repository_collection,
     list_all_repository_collections,
@@ -60,36 +74,78 @@ async def handle_installation_event(payload: InstallationPayload):
     
     logger.info(f"Handling installation event: {action} for installation {installation_id}")
     
-    if action == "created":
-        # App was installed
-        if payload.repositories:
-            logger.info(f"App installed with access to {len(payload.repositories)} repositories")
+    try:
+        if action == "created":
+            # App was installed
+            if payload.repositories:
+                logger.info(f"App installed with access to {len(payload.repositories)} repositories")
+                
+                # Queue all repositories for indexing with high priority
+                for repo in payload.repositories:
+                    try:
+                        await indexing_service.add_repository(
+                            repo_full_name=repo.full_name,
+                            installation_id=installation_id,
+                            priority=0,  # Highest priority for new installations
+                            force_refresh=False
+                        )
+                        logger.info(f"Queued {repo.full_name} for initial indexing")
+                    except Exception as e:
+                        logger.error(f"Failed to queue {repo.full_name} for indexing: {str(e)}")
+            else:
+                logger.info("App installed with repository selection - will wait for repository access events")
+        
+        elif action == "deleted":
+            # App was uninstalled - clean up data if repositories are provided
+            logger.info(f"App uninstalled from installation {installation_id}")
             
-            # Queue all repositories for indexing with high priority
-            for repo in payload.repositories:
-                await indexing_service.add_repository(
-                    repo_full_name=repo.full_name,
-                    installation_id=installation_id,
-                    priority=0,  # Highest priority for new installations
-                    force_refresh=False
-                )
-                logger.info(f"Queued {repo.full_name} for initial indexing")
+            if payload.repositories:
+                logger.info(f"Cleaning up data for {len(payload.repositories)} repositories")
+                for repo in payload.repositories:
+                    try:
+                        # Cancel any pending indexing
+                        cancelled = await indexing_service.cancel_indexing(repo.full_name)
+                        if cancelled:
+                            logger.info(f"Cancelled pending indexing for {repo.full_name}")
+                        
+                        # Optionally delete the knowledge base
+                        # Note: Commented out to preserve data in case of accidental uninstalls
+                        # success = await delete_repository_collection(repo.full_name)
+                        # if success:
+                        #     logger.info(f"Deleted collection for {repo.full_name}")
+                        
+                    except Exception as e:
+                        logger.error(f"Error cleaning up {repo.full_name}: {str(e)}")
+            else:
+                logger.info("App deletion event received without repository list - skipping cleanup")
+        
+        elif action == "suspend":
+            logger.info(f"App suspended for installation {installation_id}")
+        
+        elif action == "unsuspend": 
+            logger.info(f"App unsuspended for installation {installation_id}")
+            
+            # Re-queue repositories for indexing if available
+            if payload.repositories:
+                logger.info(f"Re-queuing {len(payload.repositories)} repositories after unsuspension")
+                for repo in payload.repositories:
+                    try:
+                        await indexing_service.add_repository(
+                            repo_full_name=repo.full_name,
+                            installation_id=installation_id,
+                            priority=1,  # High priority for unsuspended apps
+                            force_refresh=False
+                        )
+                        logger.info(f"Re-queued {repo.full_name} for indexing after unsuspension")
+                    except Exception as e:
+                        logger.error(f"Failed to re-queue {repo.full_name} for indexing: {str(e)}")
+        
         else:
-            logger.info("App installed with repository selection - will wait for repository access events")
-    
-    elif action == "deleted":
-        # App was uninstalled - could clean up data here
-        logger.info(f"App uninstalled from installation {installation_id}")
-        # Note: We could implement cleanup logic here if needed
-    
-    elif action == "suspend":
-        logger.info(f"App suspended for installation {installation_id}")
-    
-    elif action == "unsuspend": 
-        logger.info(f"App unsuspended for installation {installation_id}")
-    
-    else:
-        logger.info(f"Unhandled installation action: {action}")
+            logger.info(f"Unhandled installation action: {action}")
+            
+    except Exception as e:
+        logger.exception(f"Error handling installation event {action} for installation {installation_id}: {str(e)}")
+        # Don't re-raise the exception to avoid webhook failure
 
 async def handle_installation_repositories_event(payload: InstallationRepositoriesPayload):
     """Handle when repositories are added/removed from installation."""
@@ -98,36 +154,47 @@ async def handle_installation_repositories_event(payload: InstallationRepositori
     
     logger.info(f"Handling installation_repositories event: {action} for installation {installation_id}")
     
-    if action == "added" and payload.repositories_added:
-        logger.info(f"Repositories added: {len(payload.repositories_added)}")
-        
-        # Queue new repositories for indexing
-        for repo in payload.repositories_added:
-            await indexing_service.add_repository(
-                repo_full_name=repo.full_name,
-                installation_id=installation_id,
-                priority=1,  # High priority for newly added repos
-                force_refresh=False
-            )
-            logger.info(f"Queued {repo.full_name} for indexing after being added to installation")
-    
-    elif action == "removed" and payload.repositories_removed:
-        logger.info(f"Repositories removed: {len(payload.repositories_removed)}")
-        
-        # Cancel indexing and optionally clean up data
-        for repo in payload.repositories_removed:
-            # Cancel any pending indexing
-            cancelled = await indexing_service.cancel_indexing(repo.full_name)
-            if cancelled:
-                logger.info(f"Cancelled pending indexing for {repo.full_name}")
+    try:
+        if action == "added" and payload.repositories_added:
+            logger.info(f"Repositories added: {len(payload.repositories_added)}")
             
-            # Optionally delete the knowledge base
-            # Note: You might want to keep it for some time in case repo is re-added
-            # await delete_repository_collection(repo.full_name)
-            logger.info(f"Repository {repo.full_name} removed from installation")
-    
-    else:
-        logger.info(f"Unhandled installation_repositories action: {action}")
+            # Queue new repositories for indexing
+            for repo in payload.repositories_added:
+                try:
+                    await indexing_service.add_repository(
+                        repo_full_name=repo.full_name,
+                        installation_id=installation_id,
+                        priority=1,  # High priority for newly added repos
+                        force_refresh=False
+                    )
+                    logger.info(f"Queued {repo.full_name} for indexing after being added to installation")
+                except Exception as e:
+                    logger.error(f"Failed to queue {repo.full_name} for indexing: {str(e)}")
+        
+        elif action == "removed" and payload.repositories_removed:
+            logger.info(f"Repositories removed: {len(payload.repositories_removed)}")
+            
+            # Cancel indexing and optionally clean up data
+            for repo in payload.repositories_removed:
+                try:
+                    # Cancel any pending indexing
+                    cancelled = await indexing_service.cancel_indexing(repo.full_name)
+                    if cancelled:
+                        logger.info(f"Cancelled pending indexing for {repo.full_name}")
+                    
+                    # Optionally delete the knowledge base
+                    # Note: You might want to keep it for some time in case repo is re-added
+                    # await delete_repository_collection(repo.full_name)
+                    logger.info(f"Repository {repo.full_name} removed from installation")
+                except Exception as e:
+                    logger.error(f"Error handling removal of {repo.full_name}: {str(e)}")
+        
+        else:
+            logger.info(f"Unhandled installation_repositories action: {action}")
+            
+    except Exception as e:
+        logger.exception(f"Error handling installation_repositories event {action} for installation {installation_id}: {str(e)}")
+        # Don't re-raise the exception to avoid webhook failure
 
 @router.post("/webhook")
 async def github_webhook(request: Request):
@@ -211,26 +278,136 @@ async def github_webhook(request: Request):
                     content={"detail": "Pong! Webhook received successfully"}
                 )
             elif event_type == "issue_comment":
-                data = IssueCommentPayload(**payload)
-                if data.sender and data.sender.type == "Bot":
-                    logger.info(f"Ignoring comment from bot: {data.sender.login}")
+                try:
+                    data = IssueCommentPayload(**payload)
+                    if data.sender and data.sender.type == "Bot":
+                        logger.info(f"Ignoring comment from bot: {data.sender.login}")
+                        return JSONResponse(
+                            status_code=status.HTTP_200_OK,
+                            content={"detail": "Comment from bot ignored"}
+                        )
+                    await handle_issue_comment_event(data)
+                except ValidationError as e:
+                    logger.error(f"Validation error for issue_comment event: {str(e)}")
+                    # Log the raw payload for debugging
+                    logger.debug(f"Raw payload that failed validation: {payload}")
+                    return JSONResponse(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        content={"detail": f"Invalid issue_comment payload: {str(e)}"}
+                    )
+            elif event_type == "issues":
+                try:
+                    data = IssuesPayload(**payload)
+                    # Use enhanced handler for better issue similarity detection
+                    await handle_issue_event_enhanced(data)
+                except ValidationError as e:
+                    logger.error(f"Validation error for issues event: {str(e)}")
+                    logger.debug(f"Raw payload that failed validation: {payload}")
+                    return JSONResponse(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        content={"detail": f"Invalid issues payload: {str(e)}"}
+                    )
+            elif event_type == "push":
+                try:
+                    data = PushPayload(**payload)
+                    await handle_push_event(data)
+                except ValidationError as e:
+                    logger.error(f"Validation error for push event: {str(e)}")
+                    logger.debug(f"Raw payload that failed validation: {payload}")
+                    return JSONResponse(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        content={"detail": f"Invalid push payload: {str(e)}"}
+                    )
+            elif event_type == "installation":
+                try:
+                    data = InstallationPayload(**payload)
+                    await handle_installation_event(data)
+                except ValidationError as e:
+                    logger.error(f"Validation error for installation event: {str(e)}")
+                    logger.debug(f"Raw payload that failed validation: {payload}")
+                    # For installation events, we want to be more graceful since GitHub might send incomplete data
+                    logger.warning(f"Installation event validation failed, but continuing: {str(e)}")
                     return JSONResponse(
                         status_code=status.HTTP_200_OK,
-                        content={"detail": "Comment from bot ignored"}
+                        content={"detail": f"Installation event processed with warnings: {str(e)}"}
                     )
-                await handle_issue_comment_event(data)
-            elif event_type == "issues":
-                data = IssuesPayload(**payload)
-                await handle_issue_event(data)
-            elif event_type == "push":
-                data = PushPayload(**payload)
-                await handle_push_event(data)
-            elif event_type == "installation":
-                data = InstallationPayload(**payload)
-                await handle_installation_event(data)
             elif event_type == "installation_repositories":
-                data = InstallationRepositoriesPayload(**payload)
-                await handle_installation_repositories_event(data)
+                try:
+                    data = InstallationRepositoriesPayload(**payload)
+                    await handle_installation_repositories_event(data)
+                except ValidationError as e:
+                    logger.error(f"Validation error for installation_repositories event: {str(e)}")
+                    logger.debug(f"Raw payload that failed validation: {payload}")
+                    # For installation events, we want to be more graceful
+                    logger.warning(f"Installation_repositories event validation failed, but continuing: {str(e)}")
+                    return JSONResponse(
+                        status_code=status.HTTP_200_OK,
+                        content={"detail": f"Installation_repositories event processed with warnings: {str(e)}"}
+                    )
+            elif event_type == "pull_request":
+                try:
+                    data = PullRequestPayload(**payload)
+                    
+                    # Skip PRs created by bots (including this bot itself)
+                    if data.sender and data.sender.type == "Bot":
+                        logger.info(f"Ignoring pull request from bot: {data.sender.login}")
+                        return JSONResponse(
+                            status_code=status.HTTP_200_OK,
+                            content={"detail": "Pull request from bot ignored"}
+                        )
+                    
+                    action = data.action
+                    if action == "opened":
+                        await handle_pr_opened_event(data)
+                        logger.info(f"Successfully processed PR opened event for #{data.pull_request.number}")
+                    elif action in ["synchronize", "edited"]:
+                        await handle_pr_updated_event(data)
+                        logger.info(f"Successfully processed PR updated event for #{data.pull_request.number}")
+                    elif action == "closed":
+                        await handle_pr_closed_event(data)
+                        logger.info(f"Successfully processed PR closed event for #{data.pull_request.number}")
+                    else:
+                        logger.info(f"Unhandled pull_request action: {action}")
+                except ValidationError as e:
+                    logger.error(f"Validation error for pull_request event: {str(e)}")
+                    logger.debug(f"Raw payload that failed validation: {payload}")
+                    return JSONResponse(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        content={"detail": f"Invalid pull_request payload: {str(e)}"}
+                    )
+                except Exception as e:
+                    logger.exception(f"Error processing pull_request event: {str(e)}")
+                    # Don't fail the webhook for processing errors
+                    return JSONResponse(
+                        status_code=status.HTTP_200_OK,
+                        content={"detail": f"Pull request event received but processing failed: {str(e)}"}
+                    )
+            elif event_type == "pull_request_review":
+                try:
+                    data = PullRequestReviewPayload(**payload)
+                    if data.action == "submitted":
+                        await handle_pr_review_submitted_event(data)
+                    else:
+                        logger.info(f"Unhandled pull_request_review action: {data.action}")
+                except ValidationError as e:
+                    logger.error(f"Validation error for pull_request_review event: {str(e)}")
+                    logger.debug(f"Raw payload that failed validation: {payload}")
+                    return JSONResponse(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        content={"detail": f"Invalid pull_request_review payload: {str(e)}"}
+                    )
+            elif event_type == "pull_request_review_comment":
+                try:
+                    data = PullRequestReviewCommentPayload(**payload)
+                    # For now, we'll just log the comment - detailed review analysis happens elsewhere
+                    logger.info(f"Received pull request review comment from {data.sender.login if data.sender else 'unknown'} on PR #{data.pull_request.number}")
+                except ValidationError as e:
+                    logger.error(f"Validation error for pull_request_review_comment event: {str(e)}")
+                    logger.debug(f"Raw payload that failed validation: {payload}")
+                    return JSONResponse(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        content={"detail": f"Invalid pull_request_review_comment payload: {str(e)}"}
+                    )
             else:
                 logger.info(f"Unhandled event type: {event_type}")
                 return JSONResponse(
@@ -238,10 +415,11 @@ async def github_webhook(request: Request):
                     content={"detail": f"Event type {event_type} is not handled"}
                 )
         except ValidationError as e:
-            logger.error(f"Payload validation error: {str(e)}")
+            logger.error(f"Payload validation error for {event_type}: {str(e)}")
+            logger.debug(f"Raw payload that failed validation: {payload}")
             return JSONResponse(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                content={"detail": f"Invalid payload format: {str(e)}"}
+                content={"detail": f"Invalid payload format for {event_type}: {str(e)}"}
             )
         except Exception as e:
             logger.exception(f"Error processing {event_type} event")

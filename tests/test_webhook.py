@@ -14,6 +14,7 @@ from app.core.github_utils import (
 )
 from app.services.rag_service import get_or_init_repo_knowledge_base
 import base64
+from app.models.github import InstallationPayload
 
 client = TestClient(app)
 
@@ -303,3 +304,240 @@ class TestRepositoryContentFetching:
         
         # Large files should be excluded
         assert len(result) == 0 
+
+def test_installation_deleted_incomplete_data():
+    """Test handling of installation deleted event with incomplete data."""
+    payload = {
+        "action": "deleted",
+        "installation": {
+            "id": 123456
+        }
+        # Note: repositories key is missing
+    }
+    
+    response = client.post("/webhook", json=payload, headers={
+        "X-GitHub-Event": "installation",
+        "Content-Type": "application/json"
+    })
+    
+    # Should still return success even with incomplete data
+    assert response.status_code == 200
+
+@pytest.mark.asyncio
+async def test_pr_opened_webhook_success():
+    """Test successful PR opened webhook handling."""
+    
+    # Mock PR payload
+    pr_payload = {
+        "action": "opened",
+        "number": 42,
+        "pull_request": {
+            "id": 123456789,
+            "number": 42,
+            "title": "Add new feature",
+            "body": "This PR adds a new feature to the codebase.",
+            "user": {
+                "login": "contributor",
+                "type": "User"
+            },
+            "state": "open",
+            "merged": False,
+            "head": {"ref": "feature-branch", "sha": "abc123"},
+            "base": {"ref": "main", "sha": "def456"},
+            "draft": False,
+            "created_at": "2023-01-01T00:00:00Z",
+            "updated_at": "2023-01-01T00:00:00Z"
+        },
+        "repository": {
+            "id": 987654321,
+            "name": "test-repo",
+            "full_name": "owner/test-repo",
+            "owner": {"login": "owner"},
+            "private": False
+        },
+        "installation": {
+            "id": 12345678
+        },
+        "sender": {
+            "login": "contributor",
+            "type": "User"
+        }
+    }
+    
+    # Mock all the dependent functions
+    with patch('app.services.rag_service.handle_pr_opened_event') as mock_handler:
+        mock_handler.return_value = None  # Async function returning None
+        
+        response = client.post("/webhook", json=pr_payload, headers={
+            "X-GitHub-Event": "pull_request",
+            "Content-Type": "application/json"
+        })
+        
+        # Assertions
+        assert response.status_code == 200
+        assert "Successfully processed pull_request event" in response.json()["detail"]
+        mock_handler.assert_called_once()
+
+@pytest.mark.asyncio 
+async def test_pr_opened_webhook_bot_user():
+    """Test PR opened webhook handling when sender is a bot."""
+    
+    # Mock PR payload with bot sender
+    pr_payload = {
+        "action": "opened",
+        "number": 42,
+        "pull_request": {
+            "id": 123456789,
+            "number": 42,
+            "title": "Automated update",
+            "body": "This is an automated PR.",
+            "user": {
+                "login": "dependabot[bot]",
+                "type": "Bot"
+            },
+            "state": "open",
+            "merged": False,
+            "head": {"ref": "dependabot/npm_and_yarn/axios-1.0.0", "sha": "abc123"},
+            "base": {"ref": "main", "sha": "def456"},
+            "draft": False,
+            "created_at": "2023-01-01T00:00:00Z",
+            "updated_at": "2023-01-01T00:00:00Z"
+        },
+        "repository": {
+            "id": 987654321,
+            "name": "test-repo", 
+            "full_name": "owner/test-repo",
+            "owner": {"login": "owner"},
+            "private": False
+        },
+        "installation": {
+            "id": 12345678
+        },
+        "sender": {
+            "login": "dependabot[bot]",
+            "type": "Bot"
+        }
+    }
+    
+    response = client.post("/webhook", json=pr_payload, headers={
+        "X-GitHub-Event": "pull_request",
+        "Content-Type": "application/json"
+    })
+    
+    # Assertions - should ignore bot PRs
+    assert response.status_code == 200
+    assert "Pull request from bot ignored" in response.json()["detail"]
+
+@pytest.mark.asyncio
+async def test_pr_updated_webhook_success():
+    """Test successful PR updated (synchronize) webhook handling."""
+    
+    # Mock PR payload
+    pr_payload = {
+        "action": "synchronize",
+        "number": 42,
+        "before": "old_sha",
+        "after": "new_sha",
+        "pull_request": {
+            "id": 123456789,
+            "number": 42,
+            "title": "Add new feature",
+            "body": "This PR adds a new feature to the codebase.",
+            "user": {
+                "login": "contributor",
+                "type": "User"
+            },
+            "state": "open",
+            "merged": False,
+            "head": {"ref": "feature-branch", "sha": "new_sha"},
+            "base": {"ref": "main", "sha": "def456"},
+            "draft": False,
+            "created_at": "2023-01-01T00:00:00Z",
+            "updated_at": "2023-01-01T00:00:00Z"
+        },
+        "repository": {
+            "id": 987654321,
+            "name": "test-repo",
+            "full_name": "owner/test-repo",
+            "owner": {"login": "owner"},
+            "private": False
+        },
+        "installation": {
+            "id": 12345678
+        },
+        "sender": {
+            "login": "contributor",
+            "type": "User"
+        }
+    }
+    
+    # Mock the handler function
+    with patch('app.services.rag_service.handle_pr_updated_event') as mock_handler:
+        mock_handler.return_value = None
+        
+        response = client.post("/webhook", json=pr_payload, headers={
+            "X-GitHub-Event": "pull_request",
+            "Content-Type": "application/json"
+        })
+        
+        # Assertions
+        assert response.status_code == 200
+        assert "Successfully processed pull_request event" in response.json()["detail"]
+        mock_handler.assert_called_once()
+
+@pytest.mark.asyncio
+async def test_pr_closed_webhook_success():
+    """Test successful PR closed webhook handling."""
+    
+    # Mock PR payload for merged PR
+    pr_payload = {
+        "action": "closed",
+        "number": 42,
+        "pull_request": {
+            "id": 123456789,
+            "number": 42,
+            "title": "Add new feature",
+            "body": "This PR adds a new feature to the codebase.",
+            "user": {
+                "login": "contributor",
+                "type": "User"
+            },
+            "state": "closed",
+            "merged": True,
+            "merged_at": "2023-01-01T01:00:00Z",
+            "head": {"ref": "feature-branch", "sha": "abc123"},
+            "base": {"ref": "main", "sha": "def456"},
+            "draft": False,
+            "created_at": "2023-01-01T00:00:00Z",
+            "updated_at": "2023-01-01T01:00:00Z",
+            "closed_at": "2023-01-01T01:00:00Z"
+        },
+        "repository": {
+            "id": 987654321,
+            "name": "test-repo",
+            "full_name": "owner/test-repo",
+            "owner": {"login": "owner"},
+            "private": False
+        },
+        "installation": {
+            "id": 12345678
+        },
+        "sender": {
+            "login": "contributor",
+            "type": "User"
+        }
+    }
+    
+    # Mock the handler function
+    with patch('app.services.rag_service.handle_pr_closed_event') as mock_handler:
+        mock_handler.return_value = None
+        
+        response = client.post("/webhook", json=pr_payload, headers={
+            "X-GitHub-Event": "pull_request",
+            "Content-Type": "application/json"
+        })
+        
+        # Assertions
+        assert response.status_code == 200
+        assert "Successfully processed pull_request event" in response.json()["detail"]
+        mock_handler.assert_called_once() 

@@ -16,6 +16,7 @@ import hashlib
 import shutil
 import logging
 import asyncio
+import json
 from app.core.quota_manager import quota_manager
 from chromadb.db.base import UniqueConstraintError
 from google.api_core.exceptions import PermissionDenied, ResourceExhausted, InvalidArgument
@@ -161,6 +162,75 @@ def _sanitize_collection_name(repo_full_name: str) -> str:
     
     return sanitized.lower()
 
+def _sanitize_metadata(metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Sanitize metadata for ChromaDB compatibility.
+    ChromaDB only accepts str, int, float, bool values in metadata.
+    Complex types like lists, dicts, etc. need to be converted or removed.
+    """
+    sanitized = {}
+    
+    for key, value in metadata.items():
+        if value is None:
+            # Skip None values
+            continue
+        elif isinstance(value, (str, int, float, bool)):
+            # These are directly supported by ChromaDB
+            sanitized[key] = value
+        elif isinstance(value, list):
+            # Convert lists to strings or skip if empty
+            if value:
+                # Convert non-empty lists to comma-separated strings
+                try:
+                    # Try to join if all elements are strings/numbers
+                    str_items = [str(item) for item in value if item is not None]
+                    if str_items:
+                        sanitized[key] = ", ".join(str_items)
+                except Exception:
+                    # If conversion fails, skip this metadata
+                    pass
+            # Skip empty lists entirely
+        elif isinstance(value, dict):
+            # Convert dicts to JSON strings if not too large
+            try:
+                json_str = json.dumps(value)
+                if len(json_str) < 1000:  # Reasonable size limit
+                    sanitized[f"{key}_json"] = json_str
+            except Exception:
+                # If conversion fails, skip this metadata
+                pass
+        else:
+            # For other types, try to convert to string
+            try:
+                str_value = str(value)
+                if len(str_value) < 500:  # Reasonable size limit
+                    sanitized[key] = str_value
+            except Exception:
+                # If conversion fails, skip this metadata
+                pass
+    
+    return sanitized
+
+def _filter_complex_metadata_from_documents(documents: List[Document]) -> List[Document]:
+    """
+    Filter complex metadata from documents for ChromaDB compatibility.
+    This function creates new Document instances with sanitized metadata.
+    """
+    filtered_docs = []
+    
+    for doc in documents:
+        # Sanitize the metadata
+        sanitized_metadata = _sanitize_metadata(doc.metadata)
+        
+        # Create a new document with sanitized metadata
+        filtered_doc = Document(
+            page_content=doc.page_content,
+            metadata=sanitized_metadata
+        )
+        filtered_docs.append(filtered_doc)
+    
+    return filtered_docs
+
 def _setup_persistent_chromadb(persist_directory: str) -> chromadb.ClientAPI:
     """
     Set up ChromaDB client with persistent storage configuration.
@@ -295,17 +365,70 @@ async def initialize_rag_system(
             for doc in documents_data
         ]
         
-        # Split documents into chunks
+        # Enhanced text splitter configuration for better context preservation
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            separators=["\n\n", "\n", ".", "!", "?", " "],
-            keep_separator=True,
-            add_start_index=True
+            chunk_size=chunk_size or 1500,  # Larger chunks for better context
+            chunk_overlap=chunk_overlap or 300,  # More overlap to preserve context
+            length_function=len,
+            separators=[
+                "\n\n",  # Paragraph breaks
+                "\n",    # Line breaks  
+                "\n#",   # Markdown headers
+                "\n##",  # Markdown sub-headers
+                "\n###", # Markdown sub-sub-headers
+                "```",   # Code blocks
+                "class ", # Class definitions
+                "def ",   # Function definitions
+                "function ", # JS function definitions
+                "const ", # Variable declarations
+                "let ",   # Variable declarations
+                "var ",   # Variable declarations
+                "import ", # Import statements
+                "from ",  # Import statements
+                "package ", # Package declarations
+                ". ",     # Sentence endings
+                "? ",     # Question endings
+                "! ",     # Exclamation endings
+                " ",      # Word boundaries
+                ""        # Character level (fallback)
+            ]
         )
-        split_docs = text_splitter.split_documents(documents)
-        logging.info(f"Split into {len(split_docs)} chunks.")
         
+        # Process documents with enhanced metadata
+        split_docs = []
+        for doc_data in documents_data:
+            # Create document with enhanced content
+            content = doc_data["content"]
+            metadata = doc_data.get("metadata", {})
+            
+            # Enhance content based on document type for better searchability
+            enhanced_content = content
+            doc_type = metadata.get("type", "")
+            
+            # Add searchable prefixes for better retrieval
+            if doc_type in ["readme", "repository_metadata"]:
+                enhanced_content = f"PROJECT OVERVIEW AND SETUP:\n{content}"
+            elif doc_type == "file" and metadata.get("file_path", "").endswith((".json", ".py", ".js", ".ts", ".md")):
+                file_path = metadata.get("file_path", "")
+                language = metadata.get("language", "")
+                enhanced_content = f"FILE: {file_path} ({language})\n{content}"
+            elif doc_type in ["issue", "pr"]:
+                enhanced_content = f"REPOSITORY DISCUSSION:\n{content}"
+            
+            doc = Document(
+                page_content=enhanced_content,
+                metadata=_sanitize_metadata(metadata)
+            )
+            
+            # Split into chunks
+            chunks = text_splitter.split_documents([doc])
+            split_docs.extend(chunks)
+        
+        # Filter complex metadata from documents
+        split_docs = _filter_complex_metadata_from_documents(split_docs)
+        
+        logging.info(f"Split {len(documents_data)} documents into {len(split_docs)} chunks for vectorization")
+
         # Initialize embeddings
         embeddings = GoogleGenerativeAIEmbeddings(
             google_api_key=gemini_api_key,
@@ -351,25 +474,77 @@ async def initialize_rag_system(
         # Add documents if collection is empty or we're resetting
         if reset_collection or collection.count() == 0:
             logging.info("Adding documents to vector store...")
-            vectorstore.add_documents(split_docs)
-            logging.info(f"Added {len(split_docs)} document chunks to collection.")
+            try:
+                vectorstore.add_documents(split_docs)
+                logging.info(f"Added {len(split_docs)} document chunks to collection.")
+            except Exception as e:
+                # If we get metadata validation errors, try using langchain's metadata filter
+                if "Expected metadata value to be a str, int, float or bool" in str(e):
+                    logging.warning(f"ChromaDB metadata validation failed, attempting to filter complex metadata: {str(e)}")
+                    
+                    try:
+                        # Import and use langchain's metadata filter as suggested in the error
+                        from langchain_community.vectorstores.utils import filter_complex_metadata
+                        
+                        # Apply additional filtering
+                        filtered_docs = filter_complex_metadata(split_docs)
+                        logging.info(f"Applied langchain metadata filtering, trying again with {len(filtered_docs)} documents.")
+                        
+                        vectorstore.add_documents(filtered_docs)
+                        logging.info(f"Successfully added {len(filtered_docs)} document chunks after metadata filtering.")
+                        
+                    except ImportError:
+                        logging.error("langchain_community.vectorstores.utils.filter_complex_metadata not available")
+                        # Fallback: Create minimal documents with only basic metadata
+                        minimal_docs = []
+                        for doc in split_docs:
+                            minimal_doc = Document(
+                                page_content=doc.page_content,
+                                metadata={
+                                    "source": str(doc.metadata.get("source", "unknown")),
+                                    "type": str(doc.metadata.get("type", "document"))
+                                }
+                            )
+                            minimal_docs.append(minimal_doc)
+                        
+                        vectorstore.add_documents(minimal_docs)
+                        logging.info(f"Added {len(minimal_docs)} document chunks with minimal metadata as fallback.")
+                        
+                    except Exception as filter_error:
+                        logging.error(f"Even metadata filtering failed: {str(filter_error)}")
+                        # Last resort: Add documents with no metadata
+                        try:
+                            no_metadata_docs = [
+                                Document(page_content=doc.page_content, metadata={})
+                                for doc in split_docs
+                            ]
+                            vectorstore.add_documents(no_metadata_docs)
+                            logging.info(f"Added {len(no_metadata_docs)} document chunks with no metadata as last resort.")
+                        except Exception as final_error:
+                            logging.error(f"Failed to add documents even without metadata: {str(final_error)}")
+                            raise  # Re-raise the original error
+                else:
+                    # For other types of errors, re-raise immediately
+                    raise
         else:
             logging.info(f"Using existing collection with {collection.count()} documents.")
         
-        # Create retriever with improved configuration
+        # Create enhanced retriever with better configuration for all question types
         retriever = vectorstore.as_retriever(
             search_type="mmr",  # Use MMR search for better diversity in results
             search_kwargs={
-                "k": min(6, collection.count()),  # Dynamically adjust k based on collection size
-                "lambda_mult": 0.7  # Balance between relevance (1.0) and diversity (0.0)
+                "k": min(12, max(6, collection.count() // 10)),  # Dynamic k based on collection size, more docs for complex questions
+                "lambda_mult": 0.7,  # Balance between relevance and diversity
+                "fetch_k": min(30, collection.count())  # Fetch more candidates before MMR filtering
             }
         )
         
-        # Initialize conversation memory
+        # Initialize conversation memory with larger capacity
         memory = ConversationBufferMemory(
             memory_key="chat_history",
             return_messages=True,
-            output_key="answer"
+            output_key="answer",
+            max_token_limit=4000  # Increased memory capacity
         )
         
         # Initialize LLM with token counter
@@ -382,13 +557,15 @@ async def initialize_rag_system(
             callbacks=[TokenCounterCallbackHandler()]
         )
         
-        # Create conversational retrieval chain
+        # Create conversational retrieval chain with custom prompt
+        custom_prompt = _create_custom_prompt()
         qa_chain = ConversationalRetrievalChain.from_llm(
             llm=llm,
             retriever=retriever,
             memory=memory,
             return_source_documents=True,
-            verbose=False
+            verbose=False,
+            combine_docs_chain_kwargs={"prompt": custom_prompt}
         )
         
         logging.info("RAG system initialized successfully.")
@@ -434,25 +611,40 @@ def _create_custom_prompt():
     """Create a custom prompt template for better responses."""
     from langchain.prompts import PromptTemplate
     
-    template = """You are a helpful AI assistant for a GitHub repository. Use the following pieces of context to answer the question at the end. 
+    template = """You are a helpful AI assistant that answers questions about GitHub repositories. You have access to comprehensive information about the repository including source code, documentation, configuration files, and project history.
 
-Context from repository (code, documentation, issues, and discussions):
+When answering questions about the repository:
+
+FOR PROJECT EXPLANATION QUESTIONS (what is this project, what does it do, what framework/language):
+- Look for package.json, requirements.txt, setup.py, Cargo.toml, go.mod and similar configuration files to identify frameworks and dependencies
+- Examine README files and documentation for project descriptions and setup instructions
+- Analyze source code structure to understand the project type (web app, library, CLI tool, etc.)
+- Identify the main programming languages from file extensions and imports
+- Provide clear, comprehensive explanations about the project's purpose and technology stack
+- Include setup/installation instructions when available
+
+FOR TECHNICAL QUESTIONS:
+- Reference specific files, functions, or code sections when relevant
+- Provide code examples when helpful
+- Explain technical concepts clearly
+
+IMPORTANT GUIDELINES:
+- Base your answers strictly on the actual repository content provided
+- Never mention "knowledge base", "vector database", "embeddings", or other internal technical details
+- If you cannot find specific information in the repository, clearly state what information is not available
+- Be comprehensive but well-organized with clear sections and bullet points
+- Focus on practical, actionable information
+- When discussing frameworks or technologies, be specific about versions when available
+
+Context from the repository:
 {context}
 
 Chat History:
 {chat_history}
 
-Current Question: {question}
+Question: {question}
 
-Instructions:
-1. Provide accurate, helpful responses based on the repository context
-2. Reference specific files, issues, or code sections when relevant
-3. If you don't know something, say so clearly
-4. For code questions, provide examples when possible
-5. Be concise but thorough
-6. If suggesting solutions, explain the reasoning
-
-Answer:"""
+Answer based on the repository content:"""
 
     return PromptTemplate(
         template=template,
@@ -587,4 +779,4 @@ async def list_collections(persist_directory: str) -> List[Dict[str, Any]]:
         return result
     except Exception as e:
         logging.exception("Failed to list collections")
-        return [] 
+        return []
