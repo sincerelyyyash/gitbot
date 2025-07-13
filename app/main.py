@@ -2,10 +2,12 @@ import logging
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.webhook import router as webhook_router
+from app.api.dashboard import router as dashboard_router
 from app.config import settings
 from app.services.rag_service import cleanup_inactive_collections
 from app.services.indexing_service import indexing_service
 from app.middleware.rate_limiter import RateLimitMiddleware
+from app.core.database import init_db, close_db
 import asyncio
 from google.api_core.exceptions import PermissionDenied, ResourceExhausted, InvalidArgument
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
@@ -98,6 +100,14 @@ async def validate_google_api_configuration():
 
 @app.on_event("startup")
 async def startup_event():
+    # Initialize database
+    try:
+        await init_db()
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {e}")
+        # Continue startup even if database fails
+    
     # Validate Google API configuration
     api_valid = await validate_google_api_configuration()
     
@@ -120,6 +130,14 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
+    """Clean up resources on shutdown."""
+    # Close database connections
+    try:
+        await close_db()
+        logger.info("Database connections closed")
+    except Exception as e:
+        logger.error(f"Error closing database connections: {e}")
+    
     # Stop indexing service
     await indexing_service.stop()
     
@@ -208,6 +226,7 @@ async def health_check():
 
 # Include routers
 app.include_router(webhook_router, prefix="/api")
+app.include_router(dashboard_router, prefix="/api/dashboard", tags=["dashboard"])
 
 if __name__ == "__main__":
     import uvicorn

@@ -20,6 +20,7 @@ from app.core.github_utils import (
 from app.core.quota_manager import quota_manager
 from app.config import settings
 from app.models.github import IssueCommentPayload, IssuesPayload, PushPayload
+from app.services.analytics_service import analytics_service
 import logging
 import os
 from datetime import datetime, timedelta
@@ -437,6 +438,22 @@ async def handle_issue_comment_event(payload: IssueCommentPayload):
     logger.info(f"Handling issue comment event for {repo_full_name} issue #{issue_number}")
     update_repo_activity(repo_full_name)
     
+    # Start tracking this action
+    action_log_id = await analytics_service.log_action_start(
+        action_type="issue_comment",
+        repo_full_name=repo_full_name,
+        github_event_type="issue_comment",
+        github_event_action="created",
+        target_type="issue",
+        target_number=issue_number,
+        target_id=str(payload.comment.id),
+        metadata={
+            "issue_title": issue_title,
+            "comment_length": len(comment),
+            "issue_body_length": len(issue_content)
+        }
+    )
+    
     # Check circuit breaker
     if is_circuit_breaker_open(repo_full_name):
         logger.info(f"Circuit breaker is open for {repo_full_name}, skipping response")
@@ -584,19 +601,40 @@ async def handle_issue_comment_event(payload: IssueCommentPayload):
         
         # Handle both tuple and string returns
         if isinstance(result, tuple):
-            answer, _ = result  # Ignore usage stats
+            answer, usage_stats = result
         else:
             # If we got a string, it's an error message
             answer = result
+            usage_stats = None
         
         # Post response
         await post_issue_comment(client, repo_full_name, issue_number, answer)
         
         # Reset error count on successful operation
         reset_error_count(repo_full_name)
+        
+        # Log successful completion
+        await analytics_service.log_action_complete(
+            action_log_id=action_log_id,
+            success=True,
+            response_posted=True,
+            tokens_used=usage_stats.get('total_tokens', 0) if usage_stats else None,
+            metadata={
+                "response_length": len(answer),
+                "rag_system_available": rag is not None
+            }
+        )
     
     except Exception as e:
         logger.exception(f"Error processing comment for {repo_full_name}")
+        
+        # Log failed completion
+        await analytics_service.log_action_complete(
+            action_log_id=action_log_id,
+            success=False,
+            error_message=str(e),
+            response_posted=False
+        )
         
         # Only send error message if we haven't sent one recently
         if should_send_error_response(repo_full_name, issue_number, "ProcessingError"):
@@ -940,6 +978,25 @@ async def handle_pr_opened_event(payload):
     
     logger.info(f"Handling PR opened event for #{pr_number} in {repo_full_name}")
     
+    # Start tracking this action
+    action_log_id = await analytics_service.log_action_start(
+        action_type="pr_analysis",
+        action_subtype="opened",
+        repo_full_name=repo_full_name,
+        github_event_type="pull_request",
+        github_event_action="opened",
+        target_type="pr",
+        target_number=pr_number,
+        target_id=str(pr_data.id),
+        metadata={
+            "pr_title": pr_data.title,
+            "pr_body_length": len(pr_data.body or ""),
+            "files_changed": pr_data.changed_files,
+            "additions": pr_data.additions,
+            "deletions": pr_data.deletions
+        }
+    )
+    
     # Track success of individual components
     rag_initialized = False
     client_authenticated = False
@@ -1084,10 +1141,34 @@ async def handle_pr_opened_event(payload):
         logger.info(f"Completed PR analysis for #{pr_number}: "
                    f"RAG={rag_initialized}, Analysis={analysis_completed}, Comment={comment_posted}")
         
+        # Log successful completion
+        await analytics_service.log_action_complete(
+            action_log_id=action_log_id,
+            success=True,
+            response_posted=comment_posted,
+            metadata={
+                "rag_initialized": rag_initialized,
+                "analysis_completed": analysis_completed,
+                "comment_posted": comment_posted
+            }
+        )
+        
     except ImportError as e:
         logger.error(f"Failed to import required services for PR analysis: {e}")
+        await analytics_service.log_action_complete(
+            action_log_id=action_log_id,
+            success=False,
+            error_message=f"Import error: {str(e)}",
+            response_posted=False
+        )
     except Exception as e:
         logger.exception(f"Unexpected error handling PR opened event for #{pr_number}: {e}")
+        await analytics_service.log_action_complete(
+            action_log_id=action_log_id,
+            success=False,
+            error_message=str(e),
+            response_posted=False
+        )
         
         # Final fallback: try to post a simple acknowledgment comment
         if client_authenticated:

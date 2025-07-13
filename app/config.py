@@ -87,6 +87,18 @@ class Settings(BaseSettings):
         description="List of allowed CORS origins"
     )
     
+    # Database settings
+    database_url: str = Field(
+        default="sqlite+aiosqlite:///./data/gitbot.db",
+        description="Database URL for SQLAlchemy",
+        env="DATABASE_URL"
+    )
+    database_echo: bool = Field(
+        default=False,
+        description="Enable SQLAlchemy echo for debugging",
+        env="DATABASE_ECHO"
+    )
+    
     # Security Settings
     allowed_hosts: List[str] = [
         # "localhost",

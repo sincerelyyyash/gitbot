@@ -1,6 +1,24 @@
 version: '3.8'
 
 services:
+  # PostgreSQL database for analytics (optional - defaults to SQLite)
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: gitbot
+      POSTGRES_USER: gitbot
+      POSTGRES_PASSWORD: gitbot_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gitbot"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
   app:
     build: .
     ports:
@@ -9,6 +27,12 @@ services:
       - ./data:/app/data
     env_file:
       - .env
+    environment:
+      # Use PostgreSQL for production (comment out to use SQLite)
+      - DATABASE_URL=postgresql+asyncpg://gitbot:gitbot_password@postgres:5432/gitbot
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8050/health"]
       interval: 30s
@@ -32,6 +56,9 @@ services:
       timeout: 10s
       retries: 3
     restart: unless-stopped
+
+volumes:
+  postgres_data:
 
 networks:
   default:
