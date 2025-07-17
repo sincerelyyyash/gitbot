@@ -210,10 +210,29 @@ async def post_issue_comment(
     issue_number: int,
     comment: str
 ) -> bool:
-    """Post a comment on a GitHub issue."""
+    """Post a comment on a GitHub issue, avoiding duplicates and internal errors."""
+    # Internal error messages that should not be posted
+    INTERNAL_ERROR_MESSAGES = [
+        "RAG system not initialized",
+        "API quota exceeded",
+        "I encountered an unexpected error",
+        "Failed to initialize RAG system",
+        "Query must be a non-empty string."
+    ]
+    # If the comment contains any internal error message, do not post
+    for err in INTERNAL_ERROR_MESSAGES:
+        if err.lower() in comment.lower():
+            logger.info(f"Not posting internal error message to GitHub: {err}")
+            return False
     try:
         repo = client.get_repo(repo_full_name)
         issue = repo.get_issue(issue_number)
+        # Fetch all comments for this issue
+        existing_comments = [c.body.strip() for c in issue.get_comments() if c.body]
+        # Avoid posting duplicate comments (ignoring whitespace)
+        if any(comment.strip() == existing for existing in existing_comments):
+            logger.info("Duplicate comment detected, not posting to GitHub.")
+            return False
         issue.create_comment(comment)
         return True
     except Exception as e:
