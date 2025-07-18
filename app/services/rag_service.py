@@ -970,7 +970,7 @@ async def list_all_repository_collections() -> list:
 # New PR event handlers
 
 async def handle_pr_opened_event(payload):
-    """Handle pull request opened events with comprehensive analysis."""
+    """Handle pull request opened events with PR summary only (analysis commented out)."""
     pr_data = payload.pull_request
     repo_full_name = payload.repository.full_name
     installation_id = payload.installation.id
@@ -980,7 +980,7 @@ async def handle_pr_opened_event(payload):
     
     # Start tracking this action
     action_log_id = await analytics_service.log_action_start(
-        action_type="pr_analysis",
+        action_type="pr_summary",
         action_subtype="opened",
         repo_full_name=repo_full_name,
         github_event_type="pull_request",
@@ -997,16 +997,12 @@ async def handle_pr_opened_event(payload):
         }
     )
     
-    # Track success of individual components
-    rag_initialized = False
-    client_authenticated = False
-    analysis_completed = False
-    comment_posted = False
+    # --- PR Analysis and label logic commented out ---
+    # from app.services.pr_analysis_service import pr_analysis_service
+    # from app.services.issue_similarity_service import issue_similarity_service
+    # ... (all analysis and label logic)
     
     try:
-        from app.services.pr_analysis_service import pr_analysis_service
-        from app.services.issue_similarity_service import issue_similarity_service
-        
         # Get GitHub client first
         client = await get_github_app_installation_client(
             settings.github_app_id,
@@ -1018,149 +1014,80 @@ async def handle_pr_opened_event(payload):
             logger.error(f"Could not authenticate GitHub client for {repo_full_name}")
             return
         
-        client_authenticated = True
-        logger.debug(f"Successfully authenticated GitHub client for {repo_full_name}")
-        
         # Get or initialize repository knowledge base with error handling
+        rag_system = None
         try:
             rag_system = await get_or_init_repo_knowledge_base(
                 repo_full_name=repo_full_name,
                 installation_id=installation_id,
                 include_current_content=False
             )
-            
             if rag_system and "error" not in rag_system:
-                rag_initialized = True
                 logger.debug(f"Successfully initialized RAG system for {repo_full_name}")
             else:
-                logger.warning(f"RAG system initialization failed for {repo_full_name}, will proceed with basic analysis")
+                logger.warning(f"RAG system initialization failed for {repo_full_name}, will fallback to basic summary")
                 rag_system = None
-                
         except Exception as e:
-            logger.warning(f"RAG system initialization error for {repo_full_name}: {e}, proceeding without RAG")
+            logger.warning(f"RAG system initialization error for {repo_full_name}: {e}, proceeding with basic summary")
             rag_system = None
 
-        # If RAG system initialization failed, queue repository for background indexing
-        if not rag_initialized:
-            try:
-                from app.services.indexing_service import indexing_service
-                queued = await indexing_service.add_repository(
-                    repo_full_name=repo_full_name,
-                    installation_id=installation_id,
-                    priority=2,  # Medium priority for PR-triggered indexing
-                    force_refresh=False
-                )
-                if queued:
-                    logger.info(f"Queued {repo_full_name} for background indexing due to PR #{pr_number}")
-                else:
-                    logger.debug(f"Repository {repo_full_name} already queued for indexing")
-            except Exception as e:
-                logger.warning(f"Failed to queue {repo_full_name} for indexing: {e}")
-
-        # Get PR files for analysis
+        # Gather PR context
+        pr_title = pr_data.title or "(No title)"
+        pr_body = pr_data.body or "(No description provided)"
+        pr_files = []
         try:
             pr_files = await get_pr_files(client, repo_full_name, pr_number)
-            logger.debug(f"Retrieved {len(pr_files)} files for PR #{pr_number}")
         except Exception as e:
-            logger.error(f"Failed to get PR files for #{pr_number}: {e}")
-            pr_files = []
+            logger.warning(f"Failed to get PR files for summary: {e}")
+        changed_files_list = [f.get('filename', f) for f in pr_files] if pr_files else []
+        changed_files_str = '\n'.join(f'- {f}' for f in changed_files_list) if changed_files_list else 'No files listed.'
 
-        # Perform comprehensive PR analysis with fallback
-        pr_analysis = None
-        duplicate_check = None
+        # Generate PR summary
+        summary = None
+        if rag_system:
+            # Use RAG to generate summary
+            summary_prompt = (
+                f"Summarize what this pull request does, based on its title, description, and the files it changes, "
+                f"in the context of the repository.\n\n"
+                f"Title: {pr_title}\n"
+                f"Description: {pr_body}\n"
+                f"Changed files:\n{changed_files_str}"
+            )
+            try:
+                result = await query_rag_system(
+                    rag_system,
+                    summary_prompt,
+                    repo_full_name,
+                    chat_history=[],
+                    github_client=client
+                )
+                summary = result[0] if isinstance(result, tuple) else result
+            except Exception as e:
+                logger.warning(f"RAG summary generation failed: {e}")
+                summary = None
         
-        try:
-            if pr_files:  # Only analyze if we have files
-                pr_analysis = await pr_analysis_service.analyze_pull_request(
-                    pr_data=pr_data.__dict__,
-                    pr_files=pr_files,
-                    repo_full_name=repo_full_name,
-                    installation_id=installation_id,
-                    rag_system=rag_system
-                )
-                analysis_completed = True
-                logger.debug(f"Completed PR analysis for #{pr_number}")
-            else:
-                logger.warning(f"No files to analyze for PR #{pr_number}")
-                
-        except Exception as e:
-            logger.error(f"PR analysis failed for #{pr_number}: {e}")
-            pr_analysis = None
-
-        # Check for duplicate functionality if RAG system is available
-        try:
-            if rag_system:
-                duplicate_check = await issue_similarity_service.analyze_issue_similarity(
-                    new_issue={
-                        "title": pr_data.title,
-                        "body": pr_data.body or "",
-                        "number": pr_number
-                    },
-                    repo_full_name=repo_full_name,
-                    installation_id=installation_id,
-                    rag_system=rag_system
-                )
-                logger.debug(f"Completed duplicate check for PR #{pr_number}")
-            else:
-                logger.debug(f"Skipping duplicate check for PR #{pr_number} (no RAG system)")
-                
-        except Exception as e:
-            logger.warning(f"Duplicate check failed for PR #{pr_number}: {e}")
-            duplicate_check = None
-
-        # Generate comprehensive review comment or fallback comment
-        try:
-            if pr_analysis:
-                await _post_pr_analysis_comment(
-                    client, repo_full_name, pr_number, pr_analysis, duplicate_check
-                )
-            else:
-                # Post a basic welcome comment if analysis failed
-                await _post_fallback_pr_comment(
-                    client, repo_full_name, pr_number, len(pr_files)
-                )
-            comment_posted = True
-            
-        except Exception as e:
-            logger.error(f"Failed to post PR comment for #{pr_number}: {e}")
-
-        # Add appropriate labels based on analysis (if available)
-        try:
-            if pr_analysis:
-                await _add_analysis_based_labels(
-                    client, repo_full_name, pr_number, pr_analysis
-                )
-            else:
-                # Add basic labels for new PRs
-                await _add_basic_pr_labels(client, repo_full_name, pr_number)
-                
-        except Exception as e:
-            logger.warning(f"Failed to add labels to PR #{pr_number}: {e}")
+        if not summary:
+            # Fallback: basic summary
+            summary = (
+                f"### 📝 PR Summary\n\n"
+                f"**Title:** {pr_title}\n\n"
+                f"**Description:** {pr_body}\n\n"
+                f"**Files changed:**\n{changed_files_str}\n"
+            )
         
-        # Log final status
-        logger.info(f"Completed PR analysis for #{pr_number}: "
-                   f"RAG={rag_initialized}, Analysis={analysis_completed}, Comment={comment_posted}")
+        # Post the summary as a comment
+        await post_pr_comment(client, repo_full_name, pr_number, summary)
         
         # Log successful completion
         await analytics_service.log_action_complete(
             action_log_id=action_log_id,
             success=True,
-            response_posted=comment_posted,
+            response_posted=True,
             metadata={
-                "rag_initialized": rag_initialized,
-                "analysis_completed": analysis_completed,
-                "comment_posted": comment_posted
+                "summary_posted": True
             }
         )
         
-    except ImportError as e:
-        logger.error(f"Failed to import required services for PR analysis: {e}")
-        await analytics_service.log_action_complete(
-            action_log_id=action_log_id,
-            success=False,
-            error_message=f"Import error: {str(e)}",
-            response_posted=False
-        )
     except Exception as e:
         logger.exception(f"Unexpected error handling PR opened event for #{pr_number}: {e}")
         await analytics_service.log_action_complete(
@@ -1171,7 +1098,7 @@ async def handle_pr_opened_event(payload):
         )
         
         # Final fallback: try to post a simple acknowledgment comment
-        if client_authenticated:
+        if client:
             try:
                 simple_comment = (
                     f"👋 Thank you for your pull request #{pr_number}!\n\n"
