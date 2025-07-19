@@ -44,6 +44,7 @@ class RepositoryStats(BaseModel):
     avg_response_time_ms: float
     issues_analyzed: int
     prs_analyzed: int
+    pr_summaries_generated: int
     duplicates_found: int
     security_issues_found: int
     last_activity: Optional[str]
@@ -211,6 +212,7 @@ async def get_repository_stats(
             avg_response_time_ms=avg_response_time,
             issues_analyzed=stats.get('issues', {}).get('total', 0),
             prs_analyzed=stats.get('pull_requests', {}).get('total', 0),
+            pr_summaries_generated=stats.get('pr_summaries', {}).get('total', 0),
             duplicates_found=stats.get('issues', {}).get('duplicates', 0),
             security_issues_found=stats.get('pull_requests', {}).get('security_issues_found', 0),
             last_activity=None,  # TODO: Add from repository model
@@ -222,6 +224,40 @@ async def get_repository_stats(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get repository stats: {str(e)}"
+        )
+
+@router.get("/repositories/{owner}/{repo}/pr-summaries")
+async def get_repository_pr_summaries(
+    owner: str,
+    repo: str,
+    admin_token: Optional[str] = None,
+    limit: int = Query(50, ge=1, le=100)
+):
+    """Get detailed PR summary statistics for a specific repository."""
+    verify_admin_access(admin_token)
+    
+    try:
+        repo_full_name = f"{owner}/{repo}"
+        stats = await analytics_service.get_repository_stats(repo_full_name)
+        
+        pr_summaries = stats.get('pr_summaries', {})
+        
+        return {
+            "repo_full_name": repo_full_name,
+            "total_summaries": pr_summaries.get('total', 0),
+            "successful_summaries": pr_summaries.get('successful', 0),
+            "success_rate": pr_summaries.get('success_rate', 0.0),
+            "avg_summary_length": pr_summaries.get('avg_summary_length', 0),
+            "rag_generated": pr_summaries.get('rag_generated', 0),
+            "fallback_summaries": pr_summaries.get('fallback_summaries', 0),
+            "rag_usage_rate": pr_summaries.get('rag_generated', 0) / max(pr_summaries.get('total', 1), 1)
+        }
+        
+    except Exception as e:
+        logger.exception(f"Error getting PR summary stats for {owner}/{repo}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get PR summary stats: {str(e)}"
         )
 
 # Activity and Timeline
@@ -303,6 +339,62 @@ async def get_system_health(admin_token: Optional[str] = None):
         )
 
 # Analytics and Insights
+
+@router.get("/analytics/pr-summaries")
+async def get_pr_summary_analytics(
+    repo_full_name: Optional[str] = Query(None),
+    days: int = Query(30, ge=1, le=365),
+    admin_token: Optional[str] = None
+):
+    """Get PR summary analytics and insights."""
+    verify_admin_access(admin_token)
+    
+    try:
+        stats = await analytics_service.get_repository_stats(repo_full_name)
+        timeline = await analytics_service.get_activity_timeline(repo_full_name, days)
+        
+        # Get PR summary specific stats
+        pr_summaries = stats.get('pr_summaries', {})
+        
+        # Filter timeline for PR summary actions
+        pr_summary_timeline = [
+            item for item in timeline 
+            if item['action_type'] == 'pr_summary'
+        ]
+        
+        # Calculate PR summary trends
+        total_summaries = sum(item['count'] for item in pr_summary_timeline)
+        successful_summaries = sum(item['successful'] for item in pr_summary_timeline)
+        overall_success_rate = successful_summaries / total_summaries if total_summaries > 0 else 0.0
+        
+        # Calculate RAG vs fallback usage
+        rag_generated = pr_summaries.get('rag_generated', 0)
+        fallback_summaries = pr_summaries.get('fallback_summaries', 0)
+        total_generated = rag_generated + fallback_summaries
+        rag_usage_rate = rag_generated / total_generated if total_generated > 0 else 0.0
+        
+        return JSONResponse({
+            "pr_summary_analytics": {
+                "period_days": days,
+                "total_summaries": total_summaries,
+                "successful_summaries": successful_summaries,
+                "overall_success_rate": overall_success_rate,
+                "rag_generated": rag_generated,
+                "fallback_summaries": fallback_summaries,
+                "rag_usage_rate": rag_usage_rate,
+                "avg_summary_length": pr_summaries.get('avg_summary_length', 0),
+                "repository": repo_full_name
+            },
+            "timeline_data": pr_summary_timeline,
+            "generated_at": datetime.utcnow().isoformat()
+        })
+        
+    except Exception as e:
+        logger.exception("Error getting PR summary analytics")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get PR summary analytics: {str(e)}"
+        )
 
 @router.get("/analytics/summary")
 async def get_analytics_summary(

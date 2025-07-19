@@ -18,7 +18,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
 from app.models.analytics import (
-    Repository, ActionLog, IssueAnalysis, PRAnalysis, 
+    Repository, ActionLog, IssueAnalysis, PRAnalysis, PRSummary,
     IndexingJob, UsageMetrics, SystemHealth
 )
 
@@ -295,6 +295,53 @@ class AnalyticsService:
                 self.logger.error(f"Error logging PR analysis: {e}")
                 raise
 
+    async def log_pr_summary(
+        self,
+        action_log_id: Optional[int],
+        repo_full_name: str,
+        pr_number: int,
+        pr_title: Optional[str] = None,
+        pr_body_length: Optional[int] = None,
+        files_changed: int = 0,
+        files_list: Optional[List[str]] = None,
+        lines_added: int = 0,
+        lines_deleted: int = 0,
+        summary_generated: bool = False,
+        summary_length: Optional[int] = None,
+        summary_type: Optional[str] = None,
+        rag_system_available: Optional[bool] = None,
+        summary_posted: bool = False,
+        response_time_ms: Optional[int] = None
+    ) -> int:
+        """Log PR summary generation details."""
+        async for db in get_db():
+            try:
+                summary = PRSummary(
+                    action_log_id=action_log_id,
+                    repo_full_name=repo_full_name,
+                    pr_number=pr_number,
+                    pr_title=pr_title,
+                    pr_body_length=pr_body_length,
+                    files_changed=files_changed,
+                    files_list=files_list,
+                    lines_added=lines_added,
+                    lines_deleted=lines_deleted,
+                    summary_generated=summary_generated,
+                    summary_length=summary_length,
+                    summary_type=summary_type,
+                    rag_system_available=rag_system_available,
+                    summary_posted=summary_posted,
+                    response_time_ms=response_time_ms
+                )
+                db.add(summary)
+                await db.commit()
+                await db.refresh(summary)
+                return summary.id
+            except Exception as e:
+                await db.rollback()
+                self.logger.error(f"Error logging PR summary: {e}")
+                raise
+
     # Indexing Job Tracking
     async def log_indexing_job(
         self,
@@ -455,6 +502,29 @@ class AnalyticsService:
                             'avg_score': float(pr_row.avg_score) if pr_row.avg_score else 0,
                             'security_issues_found': pr_row.total_security_issues or 0,
                             'quality_issues_found': pr_row.total_quality_issues or 0
+                        }
+                
+                # PR summary stats
+                if repo_full_name:
+                    result = await db.execute(
+                        select(
+                            func.count(PRSummary.id).label('total_summaries'),
+                            func.sum(func.case((PRSummary.summary_generated == True, 1), else_=0)).label('successful_summaries'),
+                            func.avg(PRSummary.summary_length).label('avg_summary_length'),
+                            func.sum(func.case((PRSummary.rag_system_available == True, 1), else_=0)).label('rag_generated'),
+                            func.sum(func.case((PRSummary.summary_type == 'fallback', 1), else_=0)).label('fallback_summaries')
+                        )
+                        .where(PRSummary.repo_full_name == repo_full_name)
+                    )
+                    summary_row = result.first()
+                    if summary_row:
+                        stats['pr_summaries'] = {
+                            'total': summary_row.total_summaries or 0,
+                            'successful': summary_row.successful_summaries or 0,
+                            'success_rate': (summary_row.successful_summaries or 0) / (summary_row.total_summaries or 1),
+                            'avg_summary_length': float(summary_row.avg_summary_length) if summary_row.avg_summary_length else 0,
+                            'rag_generated': summary_row.rag_generated or 0,
+                            'fallback_summaries': summary_row.fallback_summaries or 0
                         }
                 
                 return stats

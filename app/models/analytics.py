@@ -162,6 +162,44 @@ class PRAnalysis(Base):
         Index('idx_pr_issues', 'security_issues_found', 'quality_issues_found'),
     )
 
+class PRSummary(Base):
+    """Detailed tracking of pull request summary generation."""
+    __tablename__ = "pr_summaries"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    action_log_id = Column(Integer, nullable=True)  # Link to action log
+    
+    # PR details
+    repo_full_name = Column(String(255), nullable=False, index=True)
+    pr_number = Column(Integer, nullable=False)
+    pr_title = Column(Text, nullable=True)
+    pr_body_length = Column(Integer, nullable=True)
+    
+    # File changes
+    files_changed = Column(Integer, default=0)
+    files_list = Column(JSON, nullable=True)  # Array of changed file names
+    lines_added = Column(Integer, default=0)
+    lines_deleted = Column(Integer, default=0)
+    
+    # Summary details
+    summary_generated = Column(Boolean, default=False)
+    summary_length = Column(Integer, nullable=True)
+    summary_type = Column(String(50), nullable=True)  # 'rag_generated', 'fallback'
+    rag_system_available = Column(Boolean, nullable=True)
+    
+    # Response details
+    summary_posted = Column(Boolean, default=False)
+    response_time_ms = Column(Integer, nullable=True)
+    
+    # Timestamps
+    created_at = Column(DateTime, default=func.now())
+    
+    __table_args__ = (
+        Index('idx_pr_summary_repo_number', 'repo_full_name', 'pr_number'),
+        Index('idx_pr_summary_type', 'summary_type'),
+        Index('idx_pr_summary_rag', 'rag_system_available'),
+    )
+
 class IndexingJob(Base):
     """Tracking of repository indexing jobs."""
     __tablename__ = "indexing_jobs"

@@ -1044,6 +1044,9 @@ async def handle_pr_opened_event(payload):
 
         # Generate PR summary
         summary = None
+        summary_type = None
+        rag_system_available = rag_system is not None
+        
         if rag_system:
             # Use RAG to generate summary
             summary_prompt = (
@@ -1062,6 +1065,7 @@ async def handle_pr_opened_event(payload):
                     github_client=client
                 )
                 summary = result[0] if isinstance(result, tuple) else result
+                summary_type = 'rag_generated'
             except Exception as e:
                 logger.warning(f"RAG summary generation failed: {e}")
                 summary = None
@@ -1074,9 +1078,31 @@ async def handle_pr_opened_event(payload):
                 f"**Description:** {pr_body}\n\n"
                 f"**Files changed:**\n{changed_files_str}\n"
             )
+            summary_type = 'fallback'
         
         # Post the summary as a comment
-        await post_pr_comment(client, repo_full_name, pr_number, summary)
+        summary_posted = await post_pr_comment(client, repo_full_name, pr_number, summary)
+        
+        # Log PR summary details
+        try:
+            await analytics_service.log_pr_summary(
+                action_log_id=action_log_id,
+                repo_full_name=repo_full_name,
+                pr_number=pr_number,
+                pr_title=pr_title,
+                pr_body_length=len(pr_body),
+                files_changed=len(changed_files_list),
+                files_list=changed_files_list,
+                lines_added=pr_data.additions or 0,
+                lines_deleted=pr_data.deletions or 0,
+                summary_generated=summary is not None,
+                summary_length=len(summary) if summary else None,
+                summary_type=summary_type,
+                rag_system_available=rag_system_available,
+                summary_posted=summary_posted
+            )
+        except Exception as e:
+            logger.warning(f"Failed to log PR summary details: {e}")
         
         # Log successful completion
         await analytics_service.log_action_complete(
