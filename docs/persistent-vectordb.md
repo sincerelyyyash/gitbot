@@ -120,25 +120,21 @@ curl -X DELETE "http://localhost:8050/admin/collections/facebook/react?admin_tok
 ### Programmatic Usage
 
 ```python
-from app.services.rag_service import (
-    get_or_init_repo_knowledge_base,
-    refresh_repository_knowledge_base,
-    get_repository_collection_info
-)
+from app.services import rag_service
 
 # Initialize knowledge base
-rag_system = await get_or_init_repo_knowledge_base(
+rag_system = await rag_service.get_or_init_repo_knowledge_base(
     repo_full_name="facebook/react",
     installation_id=12345,
     force_refresh=False
 )
 
 # Get collection information
-info = await get_repository_collection_info("facebook/react")
+info = await rag_service.get_repository_collection_info("facebook/react")
 print(f"Collection has {info['document_count']} documents")
 
 # Refresh knowledge base
-success = await refresh_repository_knowledge_base("facebook/react", 12345)
+success = await rag_service.refresh_repository_knowledge_base("facebook/react", 12345)
 ```
 
 ## Data Persistence

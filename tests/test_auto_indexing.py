@@ -440,7 +440,7 @@ class TestIndexingServiceIntegration:
     async def test_full_indexing_workflow(self):
         """Test complete workflow from webhook to indexing completion."""
         # Mock the RAG service
-        with patch('app.services.indexing_service.get_or_init_repo_knowledge_base') as mock_rag:
+        with patch('app.services.rag_service.get_or_init_repo_knowledge_base') as mock_rag:
             with patch('app.services.indexing_service.quota_manager') as mock_quota:
                 mock_quota.check_quota.return_value = True
                 mock_rag.return_value = {"success": True}  # Successful indexing
@@ -486,7 +486,7 @@ class TestIndexingServiceIntegration:
     async def test_indexing_failure_and_retry(self):
         """Test indexing failure and retry mechanism."""
         # Mock the RAG service to fail
-        with patch('app.services.indexing_service.get_or_init_repo_knowledge_base') as mock_rag:
+        with patch('app.services.rag_service.get_or_init_repo_knowledge_base') as mock_rag:
             with patch('app.services.indexing_service.quota_manager') as mock_quota:
                 mock_quota.check_quota.return_value = True
                 mock_rag.return_value = {

@@ -33,7 +33,7 @@ app/
   │   └── webhook.py         # Webhook endpoint & event routing
   ├── core/
   │   ├── __init__.py
-  │   ├── github_rate_limiter.py # Manages GitHub API rate limits
+  │   ├── rate_limiter.py # Manages GitHub API rate limits
   │   ├── github_utils.py    # GitHub API/auth helpers
   │   ├── quota_manager.py   # Manages Gemini API quota
   │   └── rag_system.py      # RAG system logic
@@ -45,7 +45,7 @@ app/
   │   ├── indexing_service.py # Manages repository content indexing queue
   │   ├── issue_similarity_service.py # Logic for finding similar issues
   │   ├── pr_analysis_service.py # Logic for analyzing pull requests
-  │   └── rag_service.py     # Business logic for RAG, issues, and PRs
+  │   └── rag.py             # Business logic for RAG, issues, and PRs
   ├── middleware/
   │   └── rate_limiter.py      # Middleware for rate limiting
   └── config.py              # Environment/config management

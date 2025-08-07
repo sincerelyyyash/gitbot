@@ -16,7 +16,7 @@ Added `PRSummary` model to track:
 - RAG system usage (available, generated vs fallback)
 - Response tracking (posted, response time)
 
-### 2. Analytics Service (`app/services/analytics_service.py`)
+### 2. Analytics Service (`app/services/analytics.py`)
 
 Added `log_pr_summary()` method to log detailed PR summary statistics including:
 - PR metadata (title, body length, files)
@@ -30,7 +30,7 @@ Updated `get_repository_stats()` to include PR summary statistics:
 - RAG vs fallback usage
 - Average summary length
 
-### 3. RAG Service Integration (`app/services/rag_service.py`)
+### 3. RAG Service Integration (`app/services/rag.py`)
 
 Updated `handle_pr_opened_event()` to:
 - Track summary generation process

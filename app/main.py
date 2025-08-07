@@ -1,10 +1,9 @@
 import logging
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.webhook import router as webhook_router
-from app.api.dashboard import router as dashboard_router
+from app.api import webhook_api, dashboard_api, admin_api
 from app.config import settings
-from app.services.rag_service import cleanup_inactive_collections
+from app.services import rag_service
 from app.services.indexing_service import indexing_service
 from app.middleware.rate_limiter import RateLimitMiddleware
 from app.core.database import init_db, close_db
@@ -122,7 +121,7 @@ async def startup_event():
     await indexing_service.start()
     
     # Start cleanup task
-    cleanup_task = asyncio.create_task(cleanup_inactive_collections())
+    cleanup_task = asyncio.create_task(rag_service.cleanup_inactive_collections())
     background_tasks.add(cleanup_task)
     cleanup_task.add_done_callback(background_tasks.discard)
     
@@ -225,8 +224,9 @@ async def health_check():
         }
 
 # Include routers
-app.include_router(webhook_router, prefix="/api")
-app.include_router(dashboard_router, prefix="/api/dashboard", tags=["dashboard"])
+app.include_router(webhook_api.router, prefix="/api")
+app.include_router(dashboard_api.router, prefix="/api")
+app.include_router(admin_api.router, prefix="/api")
 
 if __name__ == "__main__":
     import uvicorn

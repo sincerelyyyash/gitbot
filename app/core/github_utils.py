@@ -11,7 +11,7 @@ from app.config import settings
 import time
 import base64
 from pathlib import Path
-from app.core.github_rate_limiter import github_rate_limiter
+from app.core.rate_limiter import rate_limit_manager
 from datetime import datetime, timedelta
 import re
 import difflib
@@ -156,24 +156,10 @@ QUALITY_PATTERNS = {
     ]
 }
 
-def generate_jwt_token(app_id: str, private_key: str) -> Optional[str]:
-    """Generate a JWT token for GitHub App authentication using the private key string."""
-    try:
-        # Use the private key directly from settings
-        now = int(time.time())
-        payload = {
-            "iat": now - 60,
-            "exp": now + (10 * 60),
-            "iss": app_id
-        }
-        encoded_jwt = jwt.encode(payload, private_key, algorithm="RS256")
-        logger.info("Generated JWT for GitHub App authentication.")
-        return encoded_jwt if isinstance(encoded_jwt, str) else encoded_jwt.decode("utf-8")
-    except Exception as e:
-        logger.exception(f"Failed to generate JWT token: {str(e)}")
-        return None
+# JWT token generation is now handled by GitHubAuthManager
+# Use github_auth_manager.generate_jwt_token() instead
 
-@github_rate_limiter.with_rate_limit(category="core")
+@rate_limit_manager.with_rate_limit(category="core")
 async def get_github_app_installation_client(
     app_id: str,
     private_key: str,
@@ -181,29 +167,20 @@ async def get_github_app_installation_client(
 ) -> Optional[Github]:
     """Get an authenticated GitHub client for an installation."""
     try:
-        # Create GitHub integration directly with app auth
-        git_integration = GithubIntegration(
-            auth=Auth.AppAuth(
-                app_id=app_id,
-                private_key=private_key
-            )
-        )
+        # Use GitHubAuthManager for authentication
+        from app.core.github_auth import github_auth_manager
         
-        try:
-            # Get installation access token
-            access_token = git_integration.get_access_token(installation_id).token
-            
-            # Create and return GitHub client
-            return Github(auth=Auth.Token(access_token))
-        except Exception as e:
-            logger.error(f"GitHub integration failed: {str(e)}")
-            return None
+        # Get installation token
+        access_token = await github_auth_manager.get_installation_token(installation_id)
+        
+        # Create and return GitHub client
+        return Github(auth=Auth.Token(access_token))
     
     except Exception as e:
         logger.error(f"Failed to get GitHub client: {str(e)}")
         return None
 
-@github_rate_limiter.with_rate_limit(category="core")
+@rate_limit_manager.with_rate_limit(category="core")
 async def post_issue_comment(
     client: Github,
     repo_full_name: str,
@@ -273,7 +250,7 @@ def _get_file_extension(file_path: str) -> str:
     """Get the file extension in lowercase."""
     return Path(file_path).suffix.lower()
 
-@github_rate_limiter.with_rate_limit(category="core")
+@rate_limit_manager.with_rate_limit(category="core")
 async def fetch_repository_files(
     client: Github,
     repo_full_name: str,
@@ -1057,7 +1034,7 @@ def _detect_language_from_extension(file_ext: str) -> str:
 
 # PR-specific utility functions
 
-@github_rate_limiter.with_rate_limit(category="pr")
+@rate_limit_manager.with_rate_limit(category="pr")
 async def get_pr_files(
     client: Github,
     repo_full_name: str,
@@ -1100,7 +1077,7 @@ async def get_pr_files(
         logger.error(f"Failed to get PR files for #{pr_number}: {e}")
         return []
 
-@github_rate_limiter.with_rate_limit(category="pr")
+@rate_limit_manager.with_rate_limit(category="pr")
 async def get_pr_diff(
     client: Github,
     repo_full_name: str,
@@ -1149,7 +1126,7 @@ async def get_pr_diff(
         logger.error(f"Failed to get PR diff for #{pr_number}: {e}")
         return None
 
-@github_rate_limiter.with_rate_limit(category="pr")
+@rate_limit_manager.with_rate_limit(category="pr")
 async def post_pr_comment(
     client: Github,
     repo_full_name: str,
@@ -1179,7 +1156,7 @@ async def post_pr_comment(
         logger.error(f"Failed to post PR comment on #{pr_number}: {e}")
         return False
 
-@github_rate_limiter.with_rate_limit(category="pr")
+@rate_limit_manager.with_rate_limit(category="pr")
 async def post_pr_review_comment(
     client: Github,
     repo_full_name: str,
@@ -1226,7 +1203,7 @@ async def post_pr_review_comment(
         logger.error(f"Failed to post PR review comment: {e}")
         return False
 
-@github_rate_limiter.with_rate_limit(category="pr")
+@rate_limit_manager.with_rate_limit(category="pr")
 async def create_pr_review(
     client: Github,
     repo_full_name: str,
@@ -1276,7 +1253,7 @@ async def create_pr_review(
         logger.error(f"Failed to create PR review: {e}")
         return False
 
-@github_rate_limiter.with_rate_limit(category="pr")
+@rate_limit_manager.with_rate_limit(category="pr")
 async def get_pr_reviews(
     client: Github,
     repo_full_name: str,
@@ -1315,7 +1292,7 @@ async def get_pr_reviews(
         logger.error(f"Failed to get PR reviews: {e}")
         return []
 
-@github_rate_limiter.with_rate_limit(category="pr")
+@rate_limit_manager.with_rate_limit(category="pr")
 async def get_pr_commits(
     client: Github,
     repo_full_name: str,
@@ -1358,7 +1335,7 @@ async def get_pr_commits(
         logger.error(f"Failed to get PR commits: {e}")
         return []
 
-@github_rate_limiter.with_rate_limit(category="pr")
+@rate_limit_manager.with_rate_limit(category="pr")
 async def check_pr_mergeable(
     client: Github,
     repo_full_name: str,
@@ -1423,7 +1400,7 @@ async def check_pr_mergeable(
             "error": str(e)
         }
 
-@github_rate_limiter.with_rate_limit(category="pr")
+@rate_limit_manager.with_rate_limit(category="pr") 
 async def add_pr_labels(
     client: Github,
     repo_full_name: str,
@@ -1457,7 +1434,7 @@ async def add_pr_labels(
         logger.error(f"Failed to add labels to PR #{pr_number}: {e}")
         return False
 
-@github_rate_limiter.with_rate_limit(category="pr") 
+@rate_limit_manager.with_rate_limit(category="pr")
 async def request_pr_reviewers(
     client: Github,
     repo_full_name: str,
@@ -1762,7 +1739,7 @@ async def fetch_repository_metadata(client: Github, repo_full_name: str) -> List
         logger.exception(f"Failed to fetch repository metadata from {repo_full_name}")
         return []
 
-@github_rate_limiter.with_rate_limit(category="core")
+@rate_limit_manager.with_rate_limit(category="core")
 async def fetch_all_repository_content(
     client: Github,
     repo_full_name: str,

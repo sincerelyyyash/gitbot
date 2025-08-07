@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Any
 from enum import Enum
 import json
 import os
@@ -9,9 +9,10 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 
 from app.core.github_utils import get_github_app_installation_client
-from app.services.rag_service import get_or_init_repo_knowledge_base, reset_error_count
+from app.services import rag_service
 from app.config import settings
 from app.core.quota_manager import quota_manager
+from .base import BaseService
 
 logger = logging.getLogger("indexing_service")
 
@@ -253,10 +254,11 @@ class IndexingQueue:
                 logger.info(f"Cleaned up {cleaned_count} old indexing jobs")
                 self._save_queue()
 
-class IndexingService:
+class IndexingService(BaseService[Dict]):
     """Main indexing service that processes the queue."""
     
     def __init__(self, max_concurrent_jobs: int = 3):
+        super().__init__("IndexingService")
         self.queue = IndexingQueue()
         self.max_concurrent_jobs = max_concurrent_jobs
         self._workers: List[asyncio.Task] = []
@@ -342,7 +344,7 @@ class IndexingService:
                 return False, "API quota exceeded"
             
             # Initialize the knowledge base (this will do the indexing)
-            rag_result = await get_or_init_repo_knowledge_base(
+            rag_result = await rag_service.get_or_init_repo_knowledge_base(
                 repo_full_name=job.repo_full_name,
                 installation_id=job.installation_id,
                 include_current_content=False,  # Don't include current content for background indexing
@@ -358,7 +360,7 @@ class IndexingService:
                 return False, f"{error_type}: {error_message}"
             
             # Reset error count on successful indexing
-            reset_error_count(job.repo_full_name)
+            rag_service._reset_error_count(job.repo_full_name)
             
             logger.info(f"Successfully indexed {job.repo_full_name}")
             return True, None
@@ -406,6 +408,30 @@ class IndexingService:
     async def cancel_indexing(self, repo_full_name: str) -> bool:
         """Cancel indexing for a repository."""
         return await self.queue.cancel_job(repo_full_name)
+    
+    async def health_check(self) -> Dict[str, Any]:
+        """Perform health check for the indexing service."""
+        try:
+            # Check if workers are running
+            active_workers = len([w for w in self._workers if not w.done()])
+            
+            # Get queue status
+            queue_status = await self.queue.get_status()
+            
+            return {
+                "status": "healthy" if active_workers > 0 else "unhealthy",
+                "active_workers": active_workers,
+                "max_workers": self.max_concurrent_jobs,
+                "queue_length": len(self.queue._queue),
+                "processing_count": len(self.queue._processing),
+                "stats": self._stats,
+                "queue_status": queue_status
+            }
+        except Exception as e:
+            return {
+                "status": "unhealthy",
+                "error": str(e)
+            }
 
 # Global indexing service instance
 indexing_service = IndexingService(max_concurrent_jobs=3) 
