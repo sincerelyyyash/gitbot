@@ -30,6 +30,9 @@ from app.services import (
 from app.services.indexing_service import indexing_service
 from .base import BaseAPI
 from .auth import AuthManager
+from app.core.payload_validator import webhook_validator, payload_rate_limiter
+from app.core.cache_manager import cache_manager
+from app.core.async_utils import async_operation_context, retry_async
 
 
 class WebhookAPI(BaseAPI):
@@ -59,423 +62,284 @@ class WebhookAPI(BaseAPI):
         self.router.get("/health")(self.health_check)
     
     async def github_webhook(self, request: Request) -> JSONResponse:
-        """Handle GitHub webhook events."""
-        try:
-            # Log request info
-            headers = dict(request.headers)
-            self.logger.info(f"Received webhook request from {request.client.host}")
-            self.logger.debug(f"Headers: {headers}")
-            
-            # Validate webhook request
-            request_body, event_type = await self.auth_manager.validate_webhook_request(request)
-            
-            # Parse JSON payload
+        """
+        Handle GitHub webhook events with enhanced performance and validation.
+        
+        Features:
+        - Payload size validation and rate limiting
+        - Caching for frequently accessed data
+        - Async processing with proper error handling
+        - Performance monitoring and metrics
+        """
+        async with async_operation_context("github_webhook"):
             try:
-                payload = await request.json()
-            except Exception as e:
-                self.logger.error(f"Failed to parse JSON payload: {str(e)}")
-                return JSONResponse(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    content={"detail": "Invalid JSON payload"}
-                )
-            
-            # Handle different event types
-            try:
-                if event_type == "ping":
-                    self.logger.info("Received ping event")
-                    return JSONResponse(
-                        status_code=status.HTTP_200_OK,
-                        content={"detail": "Pong! Webhook received successfully"}
+                # Extract event type
+                event_type = request.headers.get("X-GitHub-Event")
+                if not event_type:
+                    self.logger.warning("Missing X-GitHub-Event header")
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Missing X-GitHub-Event header"
                     )
-                elif event_type == "issue_comment":
-                    return await self._handle_issue_comment(payload)
-                elif event_type == "issues":
-                    return await self._handle_issues(payload)
-                elif event_type == "push":
-                    return await self._handle_push(payload)
-                elif event_type == "installation":
-                    return await self._handle_installation(payload)
-                elif event_type == "installation_repositories":
-                    return await self._handle_installation_repositories(payload)
-                elif event_type == "pull_request":
-                    return await self._handle_pull_request(payload)
-                elif event_type == "pull_request_review":
-                    return await self._handle_pull_request_review(payload)
-                elif event_type == "pull_request_review_comment":
-                    return await self._handle_pull_request_review_comment(payload)
-                else:
-                    self.logger.info(f"Unhandled event type: {event_type}")
-                    return JSONResponse(
-                        status_code=status.HTTP_202_ACCEPTED,
-                        content={"detail": f"Event type {event_type} is not handled"}
-                    )
-            except ValidationError as e:
-                self.logger.error(f"Payload validation error for {event_type}: {str(e)}")
-                self.logger.debug(f"Raw payload that failed validation: {payload}")
-                return JSONResponse(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    content={"detail": f"Invalid payload format for {event_type}: {str(e)}"}
-                )
-            except Exception as e:
-                self.logger.exception(f"Error processing {event_type} event")
-                return JSONResponse(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    content={"detail": f"Error processing webhook: {str(e)}"}
-                )
-            
-        except Exception as e:
-            self.logger.exception("Unexpected error in webhook handler")
-            return JSONResponse(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                content={"detail": f"Internal server error: {str(e)}"}
-            )
-    
-    async def _handle_issue_comment(self, payload: Dict[str, Any]) -> JSONResponse:
-        """Handle issue comment events."""
-        try:
-            data = IssueCommentPayload(**payload)
-            
-            # Check if comment is from a bot
-            if self.auth_manager.should_ignore_bot_action(data.sender.dict() if data.sender else None):
-                return JSONResponse(
-                    status_code=status.HTTP_200_OK,
-                    content={"detail": "Comment from bot ignored"}
-                )
-            
-            await github_event_service.process_event(
-                event_type="issue_comment",
-                event_action=data.action if hasattr(data, 'action') else None,
-                payload=data.dict(),
-                repo_full_name=data.repository.full_name,
-                installation_id=data.installation.id
-            )
-            
-            return JSONResponse(
-                status_code=status.HTTP_200_OK,
-                content={"detail": "Successfully processed issue_comment event"}
-            )
-            
-        except ValidationError as e:
-            self.logger.error(f"Validation error for issue_comment event: {str(e)}")
-            self.logger.debug(f"Raw payload that failed validation: {payload}")
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={"detail": f"Invalid issue_comment payload: {str(e)}"}
-            )
-    
-    async def _handle_issues(self, payload: Dict[str, Any]) -> JSONResponse:
-        """Handle issues events."""
-        try:
-            data = IssuesPayload(**payload)
-            await github_event_service.process_event(
-                event_type="issues",
-                event_action=data.action,
-                payload=data.dict(),
-                repo_full_name=data.repository.full_name,
-                installation_id=data.installation.id
-            )
-            
-            return JSONResponse(
-                status_code=status.HTTP_200_OK,
-                content={"detail": "Successfully processed issues event"}
-            )
-            
-        except ValidationError as e:
-            self.logger.error(f"Validation error for issues event: {str(e)}")
-            self.logger.debug(f"Raw payload that failed validation: {payload}")
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={"detail": f"Invalid issues payload: {str(e)}"}
-            )
-    
-    async def _handle_push(self, payload: Dict[str, Any]) -> JSONResponse:
-        """Handle push events."""
-        try:
-            data = PushPayload(**payload)
-            await github_event_service.process_event(
-                event_type="push",
-                event_action=None,
-                payload=data.dict(),
-                repo_full_name=data.repository.full_name,
-                installation_id=data.installation.id
-            )
-            
-            return JSONResponse(
-                status_code=status.HTTP_200_OK,
-                content={"detail": "Successfully processed push event"}
-            )
-            
-        except ValidationError as e:
-            self.logger.error(f"Validation error for push event: {str(e)}")
-            self.logger.debug(f"Raw payload that failed validation: {payload}")
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={"detail": f"Invalid push payload: {str(e)}"}
-            )
-    
-    async def _handle_installation(self, payload: Dict[str, Any]) -> JSONResponse:
-        """Handle installation events."""
-        try:
-            data = InstallationPayload(**payload)
-            await self._process_installation_event(data)
-            
-            return JSONResponse(
-                status_code=status.HTTP_200_OK,
-                content={"detail": "Successfully processed installation event"}
-            )
-            
-        except ValidationError as e:
-            self.logger.error(f"Validation error for installation event: {str(e)}")
-            self.logger.debug(f"Raw payload that failed validation: {payload}")
-            # For installation events, we want to be more graceful
-            self.logger.warning(f"Installation event validation failed, but continuing: {str(e)}")
-            return JSONResponse(
-                status_code=status.HTTP_200_OK,
-                content={"detail": f"Installation event processed with warnings: {str(e)}"}
-            )
-    
-    async def _handle_installation_repositories(self, payload: Dict[str, Any]) -> JSONResponse:
-        """Handle installation repositories events."""
-        try:
-            data = InstallationRepositoriesPayload(**payload)
-            await self._process_installation_repositories_event(data)
-            
-            return JSONResponse(
-                status_code=status.HTTP_200_OK,
-                content={"detail": "Successfully processed installation_repositories event"}
-            )
-            
-        except ValidationError as e:
-            self.logger.error(f"Validation error for installation_repositories event: {str(e)}")
-            self.logger.debug(f"Raw payload that failed validation: {payload}")
-            # For installation events, we want to be more graceful
-            self.logger.warning(f"Installation_repositories event validation failed, but continuing: {str(e)}")
-            return JSONResponse(
-                status_code=status.HTTP_200_OK,
-                content={"detail": f"Installation_repositories event processed with warnings: {str(e)}"}
-            )
-    
-    async def _handle_pull_request(self, payload: Dict[str, Any]) -> JSONResponse:
-        """Handle pull request events."""
-        try:
-            data = PullRequestPayload(**payload)
-            
-            # Skip PRs created by bots
-            if self.auth_manager.should_ignore_bot_action(data.sender.dict() if data.sender else None):
-                return JSONResponse(
-                    status_code=status.HTTP_200_OK,
-                    content={"detail": "Pull request from bot ignored"}
-                )
-            
-            action = data.action
-            await github_event_service.process_event(
-                event_type="pull_request",
-                event_action=action,
-                payload=data.dict(),
-                repo_full_name=data.repository.full_name,
-                installation_id=data.installation.id
-            )
-            
-            self.logger.info(f"Successfully processed PR {action} event for #{data.pull_request.number}")
-            return JSONResponse(
-                status_code=status.HTTP_200_OK,
-                content={"detail": "Successfully processed pull_request event"}
-            )
-            
-        except ValidationError as e:
-            self.logger.error(f"Validation error for pull_request event: {str(e)}")
-            self.logger.debug(f"Raw payload that failed validation: {payload}")
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={"detail": f"Invalid pull_request payload: {str(e)}"}
-            )
-        except Exception as e:
-            self.logger.exception(f"Error processing pull_request event: {str(e)}")
-            # Don't fail the webhook for processing errors
-            return JSONResponse(
-                status_code=status.HTTP_200_OK,
-                content={"detail": f"Pull request event received but processing failed: {str(e)}"}
-            )
-    
-    async def _handle_pull_request_review(self, payload: Dict[str, Any]) -> JSONResponse:
-        """Handle pull request review events."""
-        try:
-            data = PullRequestReviewPayload(**payload)
-            await github_event_service.process_event(
-                event_type="pull_request_review",
-                event_action=data.action,
-                payload=data.dict(),
-                repo_full_name=data.repository.full_name,
-                installation_id=data.installation.id
-            )
-            
-            self.logger.info(f"Successfully processed PR review {data.action} event")
-            return JSONResponse(
-                status_code=status.HTTP_200_OK,
-                content={"detail": "Successfully processed pull_request_review event"}
-            )
-            
-        except ValidationError as e:
-            self.logger.error(f"Validation error for pull_request_review event: {str(e)}")
-            self.logger.debug(f"Raw payload that failed validation: {payload}")
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={"detail": f"Invalid pull_request_review payload: {str(e)}"}
-            )
-    
-    async def _handle_pull_request_review_comment(self, payload: Dict[str, Any]) -> JSONResponse:
-        """Handle pull request review comment events."""
-        try:
-            data = PullRequestReviewCommentPayload(**payload)
-            # For now, we'll just log the comment - detailed review analysis happens elsewhere
-            self.logger.info(f"Received pull request review comment from {data.sender.login if data.sender else 'unknown'} on PR #{data.pull_request.number}")
-            
-            return JSONResponse(
-                status_code=status.HTTP_200_OK,
-                content={"detail": "Successfully processed pull_request_review_comment event"}
-            )
-            
-        except ValidationError as e:
-            self.logger.error(f"Validation error for pull_request_review_comment event: {str(e)}")
-            self.logger.debug(f"Raw payload that failed validation: {payload}")
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={"detail": f"Invalid pull_request_review_comment payload: {str(e)}"}
-            )
-    
-    async def _process_installation_event(self, payload: InstallationPayload):
-        """Process installation event."""
-        action = payload.action
-        installation_id = payload.installation.id
-        
-        self.logger.info(f"Handling installation event: {action} for installation {installation_id}")
-        
-        try:
-            if action == "created":
-                # App was installed
-                if payload.repositories:
-                    self.logger.info(f"App installed with access to {len(payload.repositories)} repositories")
-                    
-                    # Queue all repositories for indexing with high priority
-                    for repo in payload.repositories:
-                        try:
-                            await indexing_service.add_repository(
-                                repo_full_name=repo.full_name,
-                                installation_id=installation_id,
-                                priority=0,  # Highest priority for new installations
-                                force_refresh=False
-                            )
-                            self.logger.info(f"Queued {repo.full_name} for initial indexing")
-                        except Exception as e:
-                            self.logger.error(f"Failed to queue {repo.full_name} for indexing: {str(e)}")
-                else:
-                    self.logger.info("App installed with repository selection - will wait for repository access events")
-            
-            elif action == "deleted":
-                # App was uninstalled - clean up data if repositories are provided
-                self.logger.info(f"App uninstalled from installation {installation_id}")
                 
-                if payload.repositories:
-                    self.logger.info(f"Cleaning up data for {len(payload.repositories)} repositories")
-                    for repo in payload.repositories:
-                        try:
-                            # Cancel any pending indexing
-                            cancelled = await indexing_service.cancel_indexing(repo.full_name)
-                            if cancelled:
-                                self.logger.info(f"Cancelled pending indexing for {repo.full_name}")
-                            
-                            # Optionally delete the knowledge base
-                            # Note: Commented out to preserve data in case of accidental uninstalls
-                            # success = await delete_repository_collection(repo.full_name)
-                            # if success:
-                            #     self.logger.info(f"Deleted collection for {repo.full_name}")
-                            
-                        except Exception as e:
-                            self.logger.error(f"Error cleaning up {repo.full_name}: {str(e)}")
-                else:
-                    self.logger.info("App deletion event received without repository list - skipping cleanup")
-            
-            elif action == "suspend":
-                self.logger.info(f"App suspended for installation {installation_id}")
-            
-            elif action == "unsuspend": 
-                self.logger.info(f"App unsuspended for installation {installation_id}")
-                
-                # Re-queue repositories for indexing if available
-                if payload.repositories:
-                    self.logger.info(f"Re-queuing {len(payload.repositories)} repositories after unsuspension")
-                    for repo in payload.repositories:
-                        try:
-                            await indexing_service.add_repository(
-                                repo_full_name=repo.full_name,
-                                installation_id=installation_id,
-                                priority=1,  # High priority for unsuspended apps
-                                force_refresh=False
-                            )
-                            self.logger.info(f"Re-queued {repo.full_name} for indexing after unsuspension")
-                        except Exception as e:
-                            self.logger.error(f"Failed to re-queue {repo.full_name} for indexing: {str(e)}")
-            
-            else:
-                self.logger.info(f"Unhandled installation action: {action}")
-                
-        except Exception as e:
-            self.logger.exception(f"Error handling installation event {action} for installation {installation_id}: {str(e)}")
-            # Don't re-raise the exception to avoid webhook failure
-    
-    async def _process_installation_repositories_event(self, payload: InstallationRepositoriesPayload):
-        """Process installation repositories event."""
-        action = payload.action
-        installation_id = payload.installation.id
-        
-        self.logger.info(f"Handling installation_repositories event: {action} for installation {installation_id}")
-        
-        try:
-            if action == "added" and payload.repositories_added:
-                self.logger.info(f"Repositories added: {len(payload.repositories_added)}")
-                
-                # Queue new repositories for indexing
-                for repo in payload.repositories_added:
-                    try:
-                        await indexing_service.add_repository(
-                            repo_full_name=repo.full_name,
-                            installation_id=installation_id,
-                            priority=1,  # High priority for newly added repos
-                            force_refresh=False
+                # Check payload size limits
+                content_length = request.headers.get("content-length")
+                if content_length:
+                    payload_size = int(content_length)
+                    if not await payload_rate_limiter.check_large_payload_limit(
+                        payload_size, 
+                        settings.large_payload_threshold
+                    ):
+                        raise HTTPException(
+                            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                            detail="Too many large payloads. Please try again later."
                         )
-                        self.logger.info(f"Queued {repo.full_name} for indexing after being added to installation")
-                    except Exception as e:
-                        self.logger.error(f"Failed to queue {repo.full_name} for indexing: {str(e)}")
-            
-            elif action == "removed" and payload.repositories_removed:
-                self.logger.info(f"Repositories removed: {len(payload.repositories_removed)}")
                 
-                # Cancel indexing and optionally clean up data
-                for repo in payload.repositories_removed:
-                    try:
-                        # Cancel any pending indexing
-                        cancelled = await indexing_service.cancel_indexing(repo.full_name)
-                        if cancelled:
-                            self.logger.info(f"Cancelled pending indexing for {repo.full_name}")
-                        
-                        # Optionally delete the knowledge base
-                        # Note: You might want to keep it for some time in case repo is re-added
-                        # await delete_repository_collection(repo.full_name)
-                        self.logger.info(f"Repository {repo.full_name} removed from installation")
-                    except Exception as e:
-                        self.logger.error(f"Error handling removal of {repo.full_name}: {str(e)}")
+                # Validate webhook signature
+                signature = self.auth_manager.extract_webhook_signature(request)
+                if not signature:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Invalid webhook signature"
+                    )
+                
+                # Validate and parse payload
+                payload = await webhook_validator.validate_webhook_payload(request, event_type)
+                
+                # Verify webhook signature with validated payload
+                if not self.auth_manager.verify_webhook_signature(
+                    request.body(), signature
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Invalid webhook signature"
+                    )
+                
+                # Process webhook event with caching and async processing
+                result = await self._process_webhook_event(event_type, payload)
+                
+                return JSONResponse(
+                    content={"status": "success", "message": "Webhook processed successfully"},
+                    status_code=status.HTTP_200_OK
+                )
+                
+            except HTTPException:
+                raise
+            except Exception as e:
+                self.logger.error(f"Webhook processing failed: {e}")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Internal server error"
+                )
+    
+    async def _process_webhook_event(self, event_type: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Process webhook event with caching and performance optimizations.
+        
+        Args:
+            event_type: GitHub event type
+            payload: Validated webhook payload
             
+        Returns:
+            Processing result
+        """
+        repo_full_name = payload.get("repository", {}).get("full_name")
+        
+        # Generate cache key for this event
+        cache_key = cache_manager.generate_key(
+            "webhook_event",
+            event_type=event_type,
+            repo=repo_full_name,
+            event_id=payload.get("action", "unknown")
+        )
+        
+        # Check cache for duplicate events
+        cached_result = await cache_manager.get(cache_key)
+        if cached_result:
+            self.logger.info(f"Duplicate webhook event detected, using cached result: {event_type}")
+            return cached_result
+        
+        # Process event based on type
+        try:
+            if event_type == "issue_comment":
+                result = await self._handle_issue_comment(payload)
+            elif event_type == "issues":
+                result = await self._handle_issue_event(payload)
+            elif event_type == "push":
+                result = await self._handle_push_event(payload)
+            elif event_type == "installation":
+                result = await self._handle_installation_event(payload)
+            elif event_type == "installation_repositories":
+                result = await self._handle_installation_repositories_event(payload)
+            elif event_type == "pull_request":
+                result = await self._handle_pull_request_event(payload)
+            elif event_type == "pull_request_review":
+                result = await self._handle_pull_request_review_event(payload)
+            elif event_type == "pull_request_review_comment":
+                result = await self._handle_pull_request_review_comment_event(payload)
             else:
-                self.logger.info(f"Unhandled installation_repositories action: {action}")
-                
+                self.logger.info(f"Unhandled webhook event type: {event_type}")
+                result = {"status": "ignored", "reason": "Unhandled event type"}
+            
+            # Cache the result for duplicate detection
+            await cache_manager.set(cache_key, result, ttl_seconds=300)  # 5 minutes
+            
+            return result
+            
         except Exception as e:
-            self.logger.exception(f"Error handling installation_repositories event {action} for installation {installation_id}: {str(e)}")
-            # Don't re-raise the exception to avoid webhook failure
+            self.logger.error(f"Error processing {event_type} event: {e}")
+            return {"status": "error", "error": str(e)}
+    
+    async def _handle_issue_comment(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle issue comment events with caching and async processing."""
+        repo_full_name = payload.get("repository", {}).get("full_name")
+        issue_number = payload.get("issue", {}).get("number")
+        comment_body = payload.get("comment", {}).get("body", "")
+        
+        # Check cache for similar queries
+        query_hash = cache_manager.generate_key("rag_query", repo=repo_full_name, query=comment_body)
+        cached_response = await cache_manager.get(query_hash)
+        
+        if cached_response:
+            self.logger.info(f"Using cached response for issue comment query")
+            return await self._post_cached_response(payload, cached_response)
+        
+        # Process with RAG service
+        result = await retry_async(
+            github_event_service.handle_issue_comment,
+            max_retries=3,
+            delay=1.0,
+            payload=payload
+        )
+        
+        # Cache the response
+        if result and result.get("status") == "success":
+            await cache_manager.set(query_hash, result, ttl_seconds=1800)  # 30 minutes
+        
+        return result
+    
+    async def _handle_issue_event(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle issue events with async processing."""
+        return await retry_async(
+            github_event_service.handle_issue_event,
+            max_retries=3,
+            delay=1.0,
+            payload=payload
+        )
+    
+    async def _handle_push_event(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle push events with indexing optimization."""
+        repo_full_name = payload.get("repository", {}).get("full_name")
+        installation_id = payload.get("installation", {}).get("id")
+        
+        # Queue repository for re-indexing
+        if repo_full_name and installation_id:
+            await indexing_service.queue_repository(
+                repo_full_name=repo_full_name,
+                installation_id=installation_id,
+                force_refresh=True
+            )
+        
+        return {"status": "success", "action": "queued_for_indexing"}
+    
+    async def _handle_installation_event(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle installation events."""
+        return await retry_async(
+            github_event_service.handle_installation_event,
+            max_retries=3,
+            delay=1.0,
+            payload=payload
+        )
+    
+    async def _handle_installation_repositories_event(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle installation repositories events."""
+        return await retry_async(
+            github_event_service.handle_installation_repositories_event,
+            max_retries=3,
+            delay=1.0,
+            payload=payload
+        )
+    
+    async def _handle_pull_request_event(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle pull request events with async processing."""
+        return await retry_async(
+            github_event_service.handle_pull_request_event,
+            max_retries=3,
+            delay=1.0,
+            payload=payload
+        )
+    
+    async def _handle_pull_request_review_event(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle pull request review events."""
+        return await retry_async(
+            github_event_service.handle_pull_request_review_event,
+            max_retries=3,
+            delay=1.0,
+            payload=payload
+        )
+    
+    async def _handle_pull_request_review_comment_event(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle pull request review comment events."""
+        return await retry_async(
+            github_event_service.handle_pull_request_review_comment_event,
+            max_retries=3,
+            delay=1.0,
+            payload=payload
+        )
+    
+    async def _post_cached_response(self, payload: Dict[str, Any], cached_response: Dict[str, Any]) -> Dict[str, Any]:
+        """Post cached response to GitHub."""
+        try:
+            # Extract necessary information from payload
+            repo_full_name = payload.get("repository", {}).get("full_name")
+            installation_id = payload.get("installation", {}).get("id")
+            issue_number = payload.get("issue", {}).get("number")
+            
+            if not all([repo_full_name, installation_id, issue_number]):
+                return {"status": "error", "error": "Missing required payload fields"}
+            
+            # Post the cached response
+            from app.core.github_utils import post_issue_comment
+            await post_issue_comment(
+                repo_full_name=repo_full_name,
+                issue_number=issue_number,
+                comment=cached_response.get("response", "Cached response"),
+                installation_id=installation_id
+            )
+            
+            return {"status": "success", "source": "cache"}
+            
+        except Exception as e:
+            self.logger.error(f"Error posting cached response: {e}")
+            return {"status": "error", "error": str(e)}
     
     async def health_check(self) -> JSONResponse:
-        """Health check endpoint."""
-        return JSONResponse({
-            "status": "healthy",
-            "service": "gitbot",
-            "version": "1.0.0"
-        }) 
+        """Enhanced health check with performance metrics."""
+        try:
+            # Basic health check
+            health_status = {
+                "status": "healthy",
+                "service": "webhook",
+                "timestamp": self.get_current_timestamp()
+            }
+            
+            # Add performance metrics
+            cache_stats = cache_manager.get_stats()
+            payload_stats = webhook_validator.get_validation_stats()
+            
+            health_status.update({
+                "cache": cache_stats,
+                "payload_validation": payload_stats,
+                "rate_limiting": {
+                    "large_payloads": len(payload_rate_limiter._large_payloads)
+                }
+            })
+            
+            return JSONResponse(content=health_status)
+            
+        except Exception as e:
+            self.logger.error(f"Health check failed: {e}")
+            return JSONResponse(
+                content={"status": "unhealthy", "error": str(e)},
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE
+            ) 

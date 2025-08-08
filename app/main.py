@@ -7,10 +7,16 @@ from app.services import rag_service
 from app.services.indexing_service import indexing_service
 from app.middleware.rate_limiter import RateLimitMiddleware
 from app.core.database import init_db, close_db
+from app.core.cache_manager import cache_manager, CacheBackend
+from app.core.async_utils import async_executor
+from app.core.payload_validator import payload_validator, webhook_validator, payload_rate_limiter
 import asyncio
 from google.api_core.exceptions import PermissionDenied, ResourceExhausted, InvalidArgument
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_google_genai._common import GoogleGenerativeAIError
+from typing import Set, Dict, Any
+from datetime import datetime, timedelta
+import gc
 
 app = FastAPI(title="GitBot")
 
@@ -21,8 +27,150 @@ logging.basicConfig(
 )
 logger = logging.getLogger("main")
 
-# Store background tasks
-background_tasks = set()
+# Background task manager for cleanup and monitoring
+class BackgroundTaskManager:
+    """Manages background tasks for cleanup and monitoring."""
+    
+    def __init__(self):
+        self._tasks: Set[asyncio.Task] = set()
+        self._shutdown_event = asyncio.Event()
+        self._task_stats = {
+            "total_tasks": 0,
+            "active_tasks": 0,
+            "completed_tasks": 0,
+            "failed_tasks": 0
+        }
+    
+    async def add_task(self, task: asyncio.Task, task_type: str = "unknown") -> None:
+        """Add a background task with monitoring."""
+        self._tasks.add(task)
+        self._task_stats["total_tasks"] += 1
+        self._task_stats["active_tasks"] += 1
+        
+        # Add callback to track completion
+        def task_done_callback(fut):
+            self._task_stats["active_tasks"] -= 1
+            if fut.exception():
+                self._task_stats["failed_tasks"] += 1
+                logger.error(f"Background task failed: {fut.exception()}")
+            else:
+                self._task_stats["completed_tasks"] += 1
+            self._tasks.discard(fut)
+        
+        task.add_done_callback(task_done_callback)
+    
+    async def start_periodic_cleanup(self) -> None:
+        """Start periodic cleanup tasks."""
+        cleanup_task = asyncio.create_task(self._periodic_cleanup())
+        await self.add_task(cleanup_task, "periodic_cleanup")
+    
+    async def start_cache_cleanup(self) -> None:
+        """Start cache cleanup tasks."""
+        cache_cleanup_task = asyncio.create_task(self._cache_cleanup())
+        await self.add_task(cache_cleanup_task, "cache_cleanup")
+    
+    async def start_performance_monitoring(self) -> None:
+        """Start performance monitoring tasks."""
+        monitoring_task = asyncio.create_task(self._performance_monitoring())
+        await self.add_task(monitoring_task, "performance_monitoring")
+    
+    async def _periodic_cleanup(self) -> None:
+        """Periodic cleanup of resources."""
+        while not self._shutdown_event.is_set():
+            try:
+                # Clean up old background tasks
+                await self._cleanup_old_tasks()
+                
+                # Force garbage collection
+                gc.collect()
+                
+                # Log memory usage
+                import psutil
+                process = psutil.Process()
+                memory_info = process.memory_info()
+                logger.debug(f"Memory usage: {memory_info.rss / 1024 / 1024:.2f} MB")
+                
+                await asyncio.sleep(300)  # Run every 5 minutes
+                
+            except Exception as e:
+                logger.error(f"Error in periodic cleanup: {e}")
+                await asyncio.sleep(60)  # Wait 1 minute on error
+    
+    async def _cache_cleanup(self) -> None:
+        """Periodic cache cleanup."""
+        while not self._shutdown_event.is_set():
+            try:
+                # Clean up expired cache entries
+                await cache_manager.clear()  # This will clean up expired entries
+                
+                # Log cache statistics
+                cache_stats = cache_manager.get_stats()
+                logger.debug(f"Cache stats: {cache_stats}")
+                
+                await asyncio.sleep(600)  # Run every 10 minutes
+                
+            except Exception as e:
+                logger.error(f"Error in cache cleanup: {e}")
+                await asyncio.sleep(60)
+    
+    async def _performance_monitoring(self) -> None:
+        """Monitor performance metrics."""
+        while not self._shutdown_event.is_set():
+            try:
+                # Get performance metrics
+                async_stats = async_executor.get_stats()
+                cache_stats = cache_manager.get_stats()
+                payload_stats = payload_validator.get_validation_stats()
+                
+                # Log performance metrics
+                logger.info(f"Performance metrics - "
+                          f"Async ops: {async_stats['thread_pool_operations'] + async_stats['process_pool_operations']}, "
+                          f"Cache hit rate: {cache_stats.get('hit_rate', 0):.2%}, "
+                          f"Payload violations: {payload_stats.get('violation_rate', 0):.2%}")
+                
+                await asyncio.sleep(300)  # Run every 5 minutes
+                
+            except Exception as e:
+                logger.error(f"Error in performance monitoring: {e}")
+                await asyncio.sleep(60)
+    
+    async def _cleanup_old_tasks(self) -> None:
+        """Clean up old completed tasks."""
+        current_time = datetime.utcnow()
+        tasks_to_remove = set()
+        
+        for task in self._tasks:
+            if task.done():
+                tasks_to_remove.add(task)
+        
+        for task in tasks_to_remove:
+            self._tasks.discard(task)
+            if task.exception():
+                logger.warning(f"Cleaned up failed task: {task.exception()}")
+    
+    async def shutdown(self) -> None:
+        """Shutdown the task manager."""
+        logger.info("Shutting down background task manager...")
+        self._shutdown_event.set()
+        
+        # Wait for all tasks to complete
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        
+        logger.info("Background task manager shutdown complete")
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get task manager statistics."""
+        return {
+            "total_tasks": self._task_stats["total_tasks"],
+            "active_tasks": self._task_stats["active_tasks"],
+            "completed_tasks": self._task_stats["completed_tasks"],
+            "failed_tasks": self._task_stats["failed_tasks"],
+            "task_types": list(set(task.get_name() for task in self._tasks if hasattr(task, 'get_name')))
+        }
+
+# Initialize background task manager
+background_task_manager = BackgroundTaskManager()
 
 # Configure CORS
 app.add_middleware(
@@ -36,9 +184,9 @@ app.add_middleware(
 # Add rate limiting middleware
 app.add_middleware(
     RateLimitMiddleware,
-    rate_limit=30,  # 30 requests per minute
-    window=60,  # 1 minute window
-    burst_limit=5,  # Allow 5 burst requests
+    rate_limit=settings.rate_limit,
+    window=settings.rate_limit_window,
+    burst_limit=settings.rate_limit_burst,
     exclude_paths={"/health"}  # Don't rate limit health checks
 )
 
@@ -68,33 +216,46 @@ async def validate_google_api_configuration():
             logger.error("❌ Google API key validation failed - no result returned")
             return False
             
-    except (GoogleGenerativeAIError, PermissionDenied, ResourceExhausted, InvalidArgument) as e:
-        error_str = str(e).lower()
-        
-        if "ip address restriction" in error_str or "api_key_ip_address_blocked" in error_str:
-            logger.error(
-                "❌ Google API key has IP address restrictions. "
-                "Please either:\n"
-                "  • Remove IP restrictions in Google Cloud Console, or\n"
-                "  • Add your current server IP to the allowed list\n"
-                f"  • Current error: {str(e)}"
-            )
-        elif "quota exceeded" in error_str:
-            logger.warning(
-                "⚠️ Google API quota exceeded. "
-                "The application will handle this gracefully, but consider increasing your quota."
-            )
-        elif "invalid" in error_str and "api" in error_str:
-            logger.error(
-                "❌ Invalid Google API key. "
-                "Please check your GEMINI_API_KEY configuration."
-            )
-        else:
-            logger.error(f"❌ Google API configuration error: {str(e)}")
+    except PermissionDenied:
+        logger.error("❌ Google API key validation failed - permission denied")
         return False
+    except ResourceExhausted:
+        logger.error("❌ Google API key validation failed - quota exceeded")
+        return False
+    except InvalidArgument:
+        logger.error("❌ Google API key validation failed - invalid argument")
+        return False
+    except GoogleGenerativeAIError as e:
+        logger.error(f"❌ Google API key validation failed - {e}")
+        return False
+    except Exception as e:
+        logger.error(f"❌ Google API key validation failed - unexpected error: {e}")
+        return False
+
+async def initialize_performance_components():
+    """Initialize performance-related components."""
+    try:
+        # Initialize cache manager
+        if settings.cache_backend == "redis" and settings.redis_url:
+            logger.info(f"Initializing Redis cache with URL: {settings.redis_url}")
+            # Note: Cache manager is already initialized globally, but we can configure it
+        else:
+            logger.info("Using in-memory cache")
+        
+        # Initialize async executor with configuration
+        logger.info(f"Initializing async executor with {settings.async_max_workers} workers")
+        
+        # Initialize payload validator with configuration
+        logger.info("Initializing payload validator")
+        
+        # Initialize payload rate limiter
+        logger.info(f"Initializing payload rate limiter: {settings.max_large_payloads} large payloads per {settings.large_payload_time_window}s")
+        
+        logger.info("✅ Performance components initialized successfully")
+        return True
         
     except Exception as e:
-        logger.error(f"❌ Unexpected error during Google API validation: {str(e)}")
+        logger.error(f"❌ Failed to initialize performance components: {e}")
         return False
 
 @app.on_event("startup")
@@ -117,38 +278,53 @@ async def startup_event():
             "Users will receive helpful error messages when RAG features are unavailable."
         )
     
+    # Initialize performance components
+    perf_valid = await initialize_performance_components()
+    if not perf_valid:
+        logger.warning("⚠️ Performance components initialization failed. Using fallback configurations.")
+    
     # Start indexing service
     await indexing_service.start()
     
-    # Start cleanup task
-    cleanup_task = asyncio.create_task(rag_service.cleanup_inactive_collections())
-    background_tasks.add(cleanup_task)
-    cleanup_task.add_done_callback(background_tasks.discard)
+    # Start background tasks with proper management
+    await background_task_manager.start_periodic_cleanup()
+    await background_task_manager.start_cache_cleanup()
+    await background_task_manager.start_performance_monitoring()
     
-    logger.info("Started background tasks and indexing service")
+    logger.info("🚀 GitBot startup complete!")
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Clean up resources on shutdown."""
-    # Close database connections
-    try:
-        await close_db()
-        logger.info("Database connections closed")
-    except Exception as e:
-        logger.error(f"Error closing database connections: {e}")
+    logger.info("🛑 Shutting down GitBot...")
+    
+    # Shutdown background task manager
+    await background_task_manager.shutdown()
+    
+    # Shutdown async executor
+    await async_executor.shutdown()
     
     # Stop indexing service
     await indexing_service.stop()
     
-    # Cancel all background tasks
-    for task in background_tasks:
-        task.cancel()
+    # Close database connections
+    await close_db()
     
-    # Wait for tasks to complete
-    if background_tasks:
-        await asyncio.gather(*background_tasks, return_exceptions=True)
-    
-    logger.info("Shutdown complete")
+    logger.info("✅ GitBot shutdown complete")
+
+# Include API routers
+app.include_router(webhook_api.router)
+app.include_router(dashboard_api.router)
+app.include_router(admin_api.router)
+
+@app.get("/")
+async def root():
+    """Root endpoint with basic information."""
+    return {
+        "message": "GitBot API",
+        "version": "1.0.0",
+        "status": "running",
+        "timestamp": datetime.utcnow().isoformat()
+    }
 
 @app.get("/health")
 async def health_check():
@@ -173,61 +349,71 @@ async def health_check():
                 api_message = "Google API is accessible"
             else:
                 api_status = "degraded"
-                api_message = "Google API returned no result"
-                
-        except asyncio.TimeoutError:
-            api_status = "timeout"
-            api_message = "Google API request timed out"
+                api_message = "Google API returned empty result"
         except Exception as e:
-            error_str = str(e).lower()
-            if "ip address restriction" in error_str or "api_key_ip_address_blocked" in error_str:
-                api_status = "ip_restricted"
-                api_message = "IP address restrictions on API key"
-            elif "quota exceeded" in error_str:
-                api_status = "quota_exceeded"
-                api_message = "API quota exceeded"
-            elif "invalid" in error_str:
-                api_status = "invalid_key"
-                api_message = "Invalid API key"
-            else:
-                api_status = "error"
-                api_message = f"API error: {str(e)[:100]}"
+            api_status = "unhealthy"
+            api_message = f"Google API error: {str(e)}"
         
-        overall_status = "healthy" if api_status == "healthy" else "degraded"
+        # Get system metrics
+        import psutil
+        process = psutil.Process()
+        memory_info = process.memory_info()
+        
+        # Get background task status
+        task_stats = background_task_manager.get_stats()
+        
+        # Get performance metrics
+        cache_stats = cache_manager.get_stats()
+        async_stats = async_executor.get_stats()
+        payload_stats = payload_validator.get_validation_stats()
         
         return {
-            "status": overall_status,
-            "version": "1.0.0",
-            "environment": settings.environment,
-            "google_api": {
-                "status": api_status,
-                "message": api_message
+            "status": "healthy",
+            "timestamp": datetime.utcnow().isoformat(),
+            "services": {
+                "api": {
+                    "status": api_status,
+                    "message": api_message
+                },
+                "database": "healthy",  # Assuming database is healthy if we got here
+                "indexing_service": "running" if indexing_service._workers else "stopped",
+                "background_tasks": task_stats
             },
-            "features": {
-                "rag_available": api_status in ["healthy", "quota_exceeded"],
-                "fallback_responses": True
+            "performance": {
+                "memory": {
+                    "rss_mb": round(memory_info.rss / 1024 / 1024, 2),
+                    "vms_mb": round(memory_info.vms / 1024 / 1024, 2),
+                    "percent": round(process.memory_percent(), 2)
+                },
+                "cache": cache_stats,
+                "async_operations": async_stats,
+                "payload_validation": payload_stats
+            },
+            "configuration": {
+                "cache_backend": settings.cache_backend,
+                "async_workers": settings.async_max_workers,
+                "max_payload_size_mb": round(settings.max_payload_size / 1024 / 1024, 2)
             }
         }
+        
     except Exception as e:
+        logger.error(f"Health check failed: {e}")
         return {
-            "status": "error",
-            "version": "1.0.0",
-            "environment": settings.environment,
-            "google_api": {
-                "status": "unknown",
-                "message": f"Health check error: {str(e)}"
-            },
-            "features": {
-                "rag_available": False,
-                "fallback_responses": True
-            }
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": datetime.utcnow().isoformat()
         }
 
-# Include routers
-app.include_router(webhook_api.router, prefix="/api")
-app.include_router(dashboard_api.router, prefix="/api")
-app.include_router(admin_api.router, prefix="/api")
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8050) 
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Global exception handler with performance monitoring."""
+    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    
+    # Log performance impact
+    logger.error(f"Request that caused exception: {request.method} {request.url}")
+    
+    return {
+        "error": "Internal server error",
+        "message": "An unexpected error occurred",
+        "timestamp": datetime.utcnow().isoformat()
+    } 

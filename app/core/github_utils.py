@@ -1,5 +1,5 @@
 import logging
-from typing import Optional, List, Dict, Any, Set, Tuple
+from typing import Optional, List, Dict, Any, Set, Tuple, AsyncGenerator
 from github import Github, Auth, GithubIntegration
 from github.GithubException import GithubException
 from github.Repository import Repository
@@ -15,6 +15,9 @@ from app.core.rate_limiter import rate_limit_manager
 from datetime import datetime, timedelta
 import re
 import difflib
+import asyncio
+import gc
+from contextlib import asynccontextmanager
 
 # Setup logging
 logging.basicConfig(
@@ -25,6 +28,12 @@ logger = logging.getLogger("github_utils")
 
 GITHUB_APP_ID = settings.github_app_id
 GITHUB_PRIVATE_KEY_PATH = settings.github_private_key
+
+# Memory management constants
+MAX_FILE_SIZE = 1024 * 1024  # 1MB default
+MAX_CONTENT_LENGTH = 50000  # 50KB for content processing
+MAX_DOCUMENTS_PER_BATCH = 100  # Process documents in batches
+MEMORY_CLEANUP_INTERVAL = 50  # Cleanup every 50 files
 
 # File extensions to include for code analysis
 CODE_EXTENSIONS = {
@@ -156,6 +165,34 @@ QUALITY_PATTERNS = {
     ]
 }
 
+class MemoryManager:
+    """Memory management utility for large file processing."""
+    
+    def __init__(self, max_documents: int = MAX_DOCUMENTS_PER_BATCH):
+        self.max_documents = max_documents
+        self.document_count = 0
+        self.last_cleanup = 0
+    
+    def should_cleanup(self) -> bool:
+        """Check if memory cleanup is needed."""
+        return self.document_count >= self.max_documents
+    
+    def cleanup(self):
+        """Perform memory cleanup."""
+        gc.collect()
+        self.document_count = 0
+        self.last_cleanup = time.time()
+        logger.debug("Memory cleanup performed")
+
+@asynccontextmanager
+async def memory_managed_processing():
+    """Context manager for memory-managed file processing."""
+    memory_manager = MemoryManager()
+    try:
+        yield memory_manager
+    finally:
+        memory_manager.cleanup()
+
 # JWT token generation is now handled by GitHubAuthManager
 # Use github_auth_manager.generate_jwt_token() instead
 
@@ -250,18 +287,125 @@ def _get_file_extension(file_path: str) -> str:
     """Get the file extension in lowercase."""
     return Path(file_path).suffix.lower()
 
+def _process_file_content_streaming(content: bytes, file_path: str, max_length: int = MAX_CONTENT_LENGTH) -> str:
+    """
+    Process file content with streaming to avoid memory issues.
+    
+    Args:
+        content: File content bytes
+        file_path: Path to the file
+        max_length: Maximum content length to process
+        
+    Returns:
+        Processed content string
+    """
+    try:
+        # Decode content
+        if len(content) > max_length:
+            # For large files, only process the beginning and end
+            start_content = content[:max_length // 2].decode('utf-8', errors='ignore')
+            end_content = content[-max_length // 2:].decode('utf-8', errors='ignore')
+            return f"Large file preview (first {max_length//2} and last {max_length//2} bytes):\n\nSTART:\n{start_content}\n\n... (content truncated) ...\n\nEND:\n{end_content}"
+        else:
+            return content.decode('utf-8', errors='ignore')
+    except Exception as e:
+        logger.warning(f"Failed to process content for {file_path}: {e}")
+        return f"Error processing file content: {str(e)}"
+
+async def _process_file_batch(files: List[ContentFile], repo_full_name: str, memory_manager: MemoryManager) -> List[Dict[str, Any]]:
+    """
+    Process a batch of files with memory management.
+    
+    Args:
+        files: List of GitHub ContentFile objects
+        repo_full_name: Repository full name
+        memory_manager: Memory manager instance
+        
+    Returns:
+        List of processed document dictionaries
+    """
+    documents = []
+    
+    for item in files:
+        try:
+            # Skip files that are too large
+            if item.size > MAX_FILE_SIZE:
+                logger.debug(f"Skipping large file: {item.path} ({item.size} bytes)")
+                continue
+                
+            # Skip excluded files
+            if _should_exclude_file(item.path):
+                continue
+                
+            file_ext = _get_file_extension(item.path)
+            
+            # Determine if we should process this file
+            should_process = False
+            if file_ext in CODE_EXTENSIONS:
+                should_process = True
+            elif file_ext in DOC_EXTENSIONS:
+                should_process = True
+            elif file_ext in {'.gitignore', '.env.example', 'dockerfile'}:
+                should_process = True
+                
+            if not should_process:
+                continue
+                
+            # Get file content
+            try:
+                content = item.decoded_content
+                if not _is_text_file(content):
+                    continue
+                    
+                # Process content with streaming
+                processed_content = _process_file_content_streaming(content, item.path)
+                
+                # Create document
+                document = {
+                    "content": _create_file_content_summary(processed_content, item.path),
+                    "metadata": {
+                        "type": "file",
+                        "file_path": item.path,
+                        "file_extension": file_ext,
+                        "file_size": item.size,
+                        "repository": repo_full_name,
+                        "sha": item.sha,
+                        "is_code": file_ext in CODE_EXTENSIONS,
+                        "is_documentation": file_ext in DOC_EXTENSIONS,
+                        "language": _detect_language_from_extension(file_ext)
+                    }
+                }
+                
+                documents.append(document)
+                memory_manager.document_count += 1
+                
+                # Perform memory cleanup if needed
+                if memory_manager.should_cleanup():
+                    memory_manager.cleanup()
+                    await asyncio.sleep(0.01)  # Small delay to prevent blocking
+                    
+            except Exception as e:
+                logger.warning(f"Error processing file {item.path}: {e}")
+                continue
+                
+        except Exception as e:
+            logger.warning(f"Error processing file {item.path}: {e}")
+            continue
+    
+    return documents
+
 @rate_limit_manager.with_rate_limit(category="core")
 async def fetch_repository_files(
     client: Github,
     repo_full_name: str,
     include_code: bool = True,
     include_docs: bool = True,
-    max_file_size: int = 1024 * 1024,  # 1MB max file size
+    max_file_size: int = MAX_FILE_SIZE,
     path: str = "",
     enhanced_code_analysis: bool = True
 ) -> List[Dict[str, Any]]:
     """
-    Enhanced repository file fetching with comprehensive code analysis.
+    Enhanced repository file fetching with streaming and memory management.
     
     Args:
         client: Authenticated GitHub client
@@ -275,107 +419,53 @@ async def fetch_repository_files(
     Returns:
         List of document dictionaries with enhanced metadata for code analysis
     """
-    documents = []
+    all_documents = []
     
     try:
         repo = client.get_repo(repo_full_name)
-        logger.info(f"Fetching repository files from {repo_full_name} with enhanced analysis")
+        logger.info(f"Fetching repository files from {repo_full_name} with streaming")
         
-        async def process_contents(current_path: str, depth: int = 0):
-            # Prevent infinite recursion and overly deep directory traversal
-            if depth > 10:
-                return
-                
-            try:
-                items = repo.get_contents(current_path)
-                if not hasattr(items, '__iter__'):
-                    items = [items]
+        async with memory_managed_processing() as memory_manager:
+            async def process_contents(current_path: str, depth: int = 0):
+                # Prevent infinite recursion and overly deep directory traversal
+                if depth > 10:
+                    return
                     
-                for item in items:
-                    if item.type == "dir":
-                        # Skip excluded directories
-                        if _should_exclude_file(item.path):
-                            continue
-                        await process_contents(item.path, depth + 1)
-                        
-                    elif item.type == "file":
-                        # Skip files that are too large
-                        if item.size > max_file_size:
-                            logger.info(f"Skipping large file: {item.path} ({item.size} bytes)")
-                            continue
-                            
-                        # Skip excluded files
-                        if _should_exclude_file(item.path):
-                            continue
-                            
-                        file_ext = _get_file_extension(item.path)
-                        
-                        # Determine if we should process this file
-                        should_process = False
-                        if include_code and file_ext in CODE_EXTENSIONS:
-                            should_process = True
-                        elif include_docs and file_ext in DOC_EXTENSIONS:
-                            should_process = True
-                        elif file_ext in {'.gitignore', '.env.example', 'dockerfile'}:
-                            should_process = True  # Include important config files
-                            
-                        if not should_process:
-                            continue
-                            
-                        try:
-                            content = item.decoded_content
-                            if not _is_text_file(content):
+                try:
+                    items = repo.get_contents(current_path)
+                    if not hasattr(items, '__iter__'):
+                        items = [items]
+                    
+                    # Process items in batches
+                    batch = []
+                    for item in items:
+                        if item.type == "dir":
+                            # Skip excluded directories
+                            if _should_exclude_file(item.path):
                                 continue
-                                
-                            # Decode content
-                            try:
-                                decoded_content = content.decode('utf-8')
-                            except UnicodeDecodeError:
-                                try:
-                                    decoded_content = content.decode('latin-1')
-                                except:
-                                    logger.warning(f"Could not decode file: {item.path}")
-                                    continue
+                            await process_contents(item.path, depth + 1)
+                        elif item.type == "file":
+                            batch.append(item)
                             
-                            # Enhanced code analysis
-                            if enhanced_code_analysis and file_ext in CODE_EXTENSIONS:
-                                file_documents = _analyze_code_file(
-                                    decoded_content, 
-                                    item.path, 
-                                    file_ext, 
-                                    repo_full_name,
-                                    item.sha,
-                                    item.size
-                                )
-                                documents.extend(file_documents)
-                            else:
-                                # Standard file processing for non-code files
-                                documents.append({
-                                    "content": _create_file_content_summary(decoded_content, item.path),
-                                    "metadata": {
-                                        "type": "file",
-                                        "file_path": item.path,
-                                        "file_extension": file_ext,
-                                        "file_size": item.size,
-                                        "repository": repo_full_name,
-                                        "sha": item.sha,
-                                        "is_code": file_ext in CODE_EXTENSIONS,
-                                        "is_documentation": file_ext in DOC_EXTENSIONS,
-                                        "language": _detect_language_from_extension(file_ext)
-                                    }
-                                })
-                                
-                        except Exception as e:
-                            logger.warning(f"Error processing file {item.path}: {e}")
-                            continue
-                            
-            except Exception as e:
-                logger.warning(f"Error processing directory {current_path}: {e}")
-                return
-        
-        await process_contents(path)
-        logger.info(f"Enhanced analysis fetched {len(documents)} document chunks from {repo_full_name}")
-        return documents
+                            # Process batch when it reaches the limit
+                            if len(batch) >= MAX_DOCUMENTS_PER_BATCH:
+                                batch_documents = await _process_file_batch(batch, repo_full_name, memory_manager)
+                                all_documents.extend(batch_documents)
+                                batch = []
+                    
+                    # Process remaining items in the last batch
+                    if batch:
+                        batch_documents = await _process_file_batch(batch, repo_full_name, memory_manager)
+                        all_documents.extend(batch_documents)
+                        
+                except Exception as e:
+                    logger.warning(f"Error processing directory {current_path}: {e}")
+                    return
+            
+            await process_contents(path)
+            
+        logger.info(f"Streaming fetch completed: {len(all_documents)} document chunks from {repo_full_name}")
+        return all_documents
         
     except Exception as e:
         logger.error(f"Failed to fetch repository files: {e}")

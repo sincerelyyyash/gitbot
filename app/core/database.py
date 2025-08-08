@@ -74,10 +74,11 @@ class DatabaseManager(BaseCore):
                 "echo": self.database_echo,
                 "future": True,
                 "pool_size": min(self.max_connections, 10),
-                "max_overflow": max(0, self.max_connections - 10),
+                "max_overflow": getattr(settings, 'database_max_overflow', 10),
                 "pool_timeout": self.pool_timeout,
                 "pool_recycle": self.pool_recycle,
-                "pool_pre_ping": True,  # Enable connection health checks
+                "pool_pre_ping": getattr(settings, 'database_pool_pre_ping', True),
+                "pool_reset_on_return": "commit",  # Reset connections on return
             }
             
             # SQLite specific configuration
@@ -93,17 +94,19 @@ class DatabaseManager(BaseCore):
                 **engine_kwargs
             )
             
-            # Create session factory
+            # Create session factory with proper configuration
             self._session_factory = async_sessionmaker(
                 self._engine,
                 class_=AsyncSession,
-                expire_on_commit=False
+                expire_on_commit=False,
+                autoflush=False,  # Disable autoflush to prevent memory issues
+                autocommit=False
             )
             
-            self.logger.info(f"Database initialized: {self.database_url}")
+            self.logger.info(f"Database engine initialized with pool_size={engine_kwargs['pool_size']}, max_overflow={engine_kwargs['max_overflow']}")
             
-        except Exception as error:
-            self.logger.error(f"Failed to initialize database: {error}")
+        except Exception as e:
+            self.logger.error(f"Failed to initialize database: {e}")
             raise
     
     @core_operation("get_database_session", max_retries=2)
@@ -236,21 +239,48 @@ class DatabaseManager(BaseCore):
             return self.health_status
     
     async def _get_pool_status(self) -> Dict[str, Any]:
-        """Get connection pool status."""
+        """Get current connection pool status."""
         if not self._engine:
-            return {"error": "Engine not initialized"}
+            return {"error": "Database engine not initialized"}
         
         try:
             pool = self._engine.pool
             return {
-                "size": pool.size(),
+                "pool_size": pool.size(),
                 "checked_in": pool.checkedin(),
                 "checked_out": pool.checkedout(),
                 "overflow": pool.overflow(),
-                "invalid": pool.invalid()
+                "invalid": pool.invalid(),
+                "max_overflow": getattr(pool, '_max_overflow', 'unknown')
             }
-        except Exception as error:
-            return {"error": str(error)}
+        except Exception as e:
+            self.logger.error(f"Failed to get pool status: {e}")
+            return {"error": str(e)}
+    
+    async def monitor_connections(self) -> Dict[str, Any]:
+        """Monitor database connections and perform cleanup if needed."""
+        pool_status = await self._get_pool_status()
+        
+        # Check for connection leaks
+        if isinstance(pool_status, dict) and "checked_out" in pool_status:
+            checked_out = pool_status.get("checked_out", 0)
+            pool_size = pool_status.get("pool_size", 0)
+            
+            # If more than 80% of connections are checked out, log a warning
+            if pool_size > 0 and (checked_out / pool_size) > 0.8:
+                self.logger.warning(
+                    f"High connection usage detected: {checked_out}/{pool_size} "
+                    f"connections checked out ({checked_out/pool_size*100:.1f}%)"
+                )
+            
+            # If all connections are checked out, this might indicate a leak
+            if checked_out >= pool_size:
+                self.logger.error(
+                    f"Potential connection leak detected: {checked_out}/{pool_size} "
+                    "connections checked out"
+                )
+        
+        return pool_status
     
     @core_operation("execute_database_query")
     async def execute_query(self, query: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:

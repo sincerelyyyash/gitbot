@@ -99,6 +99,33 @@ class Settings(BaseSettings):
         env="DATABASE_ECHO"
     )
     
+    # Database connection pooling settings
+    database_max_connections: int = Field(
+        default=20,
+        description="Maximum number of database connections in the pool",
+        env="DATABASE_MAX_CONNECTIONS"
+    )
+    database_pool_timeout: int = Field(
+        default=30,
+        description="Database connection pool timeout in seconds",
+        env="DATABASE_POOL_TIMEOUT"
+    )
+    database_pool_recycle: int = Field(
+        default=3600,
+        description="Database connection pool recycle time in seconds",
+        env="DATABASE_POOL_RECYCLE"
+    )
+    database_pool_pre_ping: bool = Field(
+        default=True,
+        description="Enable database connection health checks",
+        env="DATABASE_POOL_PRE_PING"
+    )
+    database_max_overflow: int = Field(
+        default=10,
+        description="Maximum overflow connections in the pool",
+        env="DATABASE_MAX_OVERFLOW"
+    )
+    
     # Security Settings
     allowed_hosts: List[str] = [
         # "localhost",
@@ -111,6 +138,100 @@ class Settings(BaseSettings):
     rate_limit: int = 30
     rate_limit_window: int = 60
     rate_limit_burst: int = 5
+    
+    # Performance Settings
+    # Cache settings
+    cache_backend: str = Field(
+        default="memory",
+        description="Cache backend (memory, redis)",
+        env="CACHE_BACKEND"
+    )
+    cache_ttl_seconds: int = Field(
+        default=300,
+        description="Default cache TTL in seconds",
+        env="CACHE_TTL_SECONDS"
+    )
+    cache_max_size: int = Field(
+        default=1000,
+        description="Maximum number of cache items",
+        env="CACHE_MAX_SIZE"
+    )
+    redis_url: Optional[str] = Field(
+        default=None,
+        description="Redis URL for caching",
+        env="REDIS_URL"
+    )
+    
+    # Async operation settings
+    async_max_workers: int = Field(
+        default=10,
+        description="Maximum number of async thread pool workers",
+        env="ASYNC_MAX_WORKERS"
+    )
+    async_max_process_workers: int = Field(
+        default=4,
+        description="Maximum number of async process pool workers",
+        env="ASYNC_MAX_PROCESS_WORKERS"
+    )
+    async_timeout_seconds: float = Field(
+        default=30.0,
+        description="Default timeout for async operations",
+        env="ASYNC_TIMEOUT_SECONDS"
+    )
+    async_batch_size: int = Field(
+        default=100,
+        description="Default batch size for async operations",
+        env="ASYNC_BATCH_SIZE"
+    )
+    
+    # Payload validation settings
+    max_payload_size: int = Field(
+        default=10 * 1024 * 1024,  # 10MB
+        description="Maximum request payload size in bytes",
+        env="MAX_PAYLOAD_SIZE"
+    )
+    max_json_depth: int = Field(
+        default=10,
+        description="Maximum JSON nesting depth",
+        env="MAX_JSON_DEPTH"
+    )
+    max_array_length: int = Field(
+        default=10000,
+        description="Maximum array length in JSON payloads",
+        env="MAX_ARRAY_LENGTH"
+    )
+    max_string_length: int = Field(
+        default=1000000,  # 1MB
+        description="Maximum string length in JSON payloads",
+        env="MAX_STRING_LENGTH"
+    )
+    max_object_keys: int = Field(
+        default=1000,
+        description="Maximum number of keys in JSON objects",
+        env="MAX_OBJECT_KEYS"
+    )
+    payload_validation_timeout: float = Field(
+        default=5.0,
+        description="Timeout for payload validation in seconds",
+        env="PAYLOAD_VALIDATION_TIMEOUT"
+    )
+    
+    # Large payload rate limiting
+    max_large_payloads: int = Field(
+        default=10,
+        description="Maximum number of large payloads per time window",
+        env="MAX_LARGE_PAYLOADS"
+    )
+    large_payload_time_window: float = Field(
+        default=60.0,
+        description="Time window for large payload rate limiting in seconds",
+        env="LARGE_PAYLOAD_TIME_WINDOW"
+    )
+    large_payload_threshold: int = Field(
+        default=1024 * 1024,  # 1MB
+        description="Size threshold for considering payload 'large'",
+        env="LARGE_PAYLOAD_THRESHOLD"
+    )
     
     @validator("chromadb_persist_dir", pre=True)
     def set_chromadb_dir(cls, v, values):
