@@ -16,6 +16,11 @@ gitbot is an AI-powered GitHub Assistant that automates Q&A, analyzes issues, an
   - **Automatic Content Indexing:** On installation, automatically indexes repository content including code, documentation, issues, and pull requests.
   - **Persistent Knowledge Base:** Uses a persistent ChromaDB vector store for each repository's knowledge base.
   - **Scheduled Re-indexing:** Periodically and automatically keeps the knowledge base up-to-date with repository changes.
+- **User Authentication & Authorization:**
+  - **GitHub OAuth 2.0 Integration:** Secure user authentication using GitHub OAuth with JWT token management.
+  - **Role-Based Access Control:** Hierarchical role system (user, admin, owner) with granular permissions.
+  - **Repository Access Management:** Fine-grained repository access control with read, write, and admin levels.
+  - **Session Management:** Database-backed session tracking with automatic cleanup and token refresh.
 - **Robust Infrastructure:**
   - **GitHub App Integration:** Authenticates as a GitHub App and handles a wide range of webhook events (installations, pushes, issues, PRs).
   - **Modular, Production-Ready Structure:** Clean separation of API, models, services, and core logic.
@@ -93,6 +98,13 @@ See `.env.example` for all required variables:
 - `GITHUB_APP_ID`
 - `GITHUB_PRIVATE_KEY`
 - `GITHUB_WEBHOOK_SECRET`
+- `GITHUB_OAUTH_CLIENT_ID`
+- `GITHUB_OAUTH_CLIENT_SECRET`
+- `GITHUB_OAUTH_REDIRECT_URI`
+- `JWT_SECRET_KEY`
+- `JWT_ALGORITHM`
+- `JWT_ACCESS_TOKEN_EXPIRE_MINUTES`
+- `JWT_REFRESH_TOKEN_EXPIRE_DAYS`
 - `GEMINI_API_KEY`
 - `CHROMA_PERSIST_DIR`
 - `ADMIN_TOKEN`

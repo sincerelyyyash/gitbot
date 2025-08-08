@@ -47,6 +47,45 @@ class Settings(BaseSettings):
         env="GITHUB_APP_NAME"
     )
     
+    # GitHub OAuth settings
+    github_oauth_client_id: str = Field(
+        ...,
+        description="GitHub OAuth App Client ID for user authentication",
+        env="GITHUB_OAUTH_CLIENT_ID"
+    )
+    github_oauth_client_secret: str = Field(
+        ...,
+        description="GitHub OAuth App Client Secret for user authentication",
+        env="GITHUB_OAUTH_CLIENT_SECRET"
+    )
+    github_oauth_redirect_uri: str = Field(
+        default="http://localhost:8000/auth/callback",
+        description="GitHub OAuth redirect URI",
+        env="GITHUB_OAUTH_REDIRECT_URI"
+    )
+    
+    # JWT settings
+    jwt_secret_key: str = Field(
+        ...,
+        description="Secret key for JWT token generation and validation",
+        env="JWT_SECRET_KEY"
+    )
+    jwt_algorithm: str = Field(
+        default="HS256",
+        description="JWT algorithm for token signing",
+        env="JWT_ALGORITHM"
+    )
+    jwt_access_token_expire_minutes: int = Field(
+        default=30,
+        description="JWT access token expiration time in minutes",
+        env="JWT_ACCESS_TOKEN_EXPIRE_MINUTES"
+    )
+    jwt_refresh_token_expire_days: int = Field(
+        default=7,
+        description="JWT refresh token expiration time in days",
+        env="JWT_REFRESH_TOKEN_EXPIRE_DAYS"
+    )
+    
     # Gemini API settings
     gemini_api_key: str = Field(
         ...,
