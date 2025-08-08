@@ -1,7 +1,7 @@
 import logging
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from app.api import webhook_api, dashboard_api, admin_api
+from app.api import webhook_api, dashboard_api, admin_api, oauth_router
 from app.config import settings
 from app.services import rag_service
 from app.services.indexing_service import indexing_service
@@ -315,6 +315,7 @@ async def shutdown_event():
 app.include_router(webhook_api.router)
 app.include_router(dashboard_api.router)
 app.include_router(admin_api.router)
+app.include_router(oauth_router)
 
 @app.get("/")
 async def root():

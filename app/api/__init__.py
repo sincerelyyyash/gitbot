@@ -17,6 +17,7 @@ from .auth import AuthManager
 from .dashboard import DashboardAPI
 from .webhook import WebhookAPI
 from .admin import AdminAPI
+from .oauth import router as oauth_router
 
 # API instances
 auth_manager = AuthManager()
@@ -39,4 +40,7 @@ __all__ = [
     "dashboard_api",
     "webhook_api", 
     "admin_api",
+    
+    # Routers
+    "oauth_router",
 ] 
