@@ -12,6 +12,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.core.database import Base
 from app.models.analytics import *  # Import all models
+from app.models.user import *  # Import user models
 from app.config import settings
 
 # this is the Alembic Config object, which provides
