@@ -13,6 +13,7 @@ from .github_events import GitHubEventService
 from .repository import RepositoryService
 from .comment import CommentService
 from .health import HealthService
+from .auth_service import AuthService
 
 # Service instances
 analytics_service = AnalyticsService()
@@ -24,6 +25,7 @@ github_event_service = GitHubEventService()
 repository_service = RepositoryService()
 comment_service = CommentService()
 health_service = HealthService()
+auth_service = AuthService()
 
 __all__ = [
     # Base classes
@@ -39,6 +41,7 @@ __all__ = [
     "RepositoryService",
     "CommentService",
     "HealthService",
+    "AuthService",
     
     # Service instances
     "analytics_service",
@@ -50,4 +53,5 @@ __all__ = [
     "repository_service",
     "comment_service",
     "health_service",
+    "auth_service",
 ] 
